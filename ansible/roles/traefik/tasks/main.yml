@@ -1,0 +1,32 @@
+---
+# The proxy network must exist before traefik (and every other service) attaches to it.
+- name: Create proxy Docker network
+  community.docker.docker_network:
+    name: proxy
+    state: present
+
+- name: Deploy traefik compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: traefik
+    compose_dirs: ["", "dynamic"]
+    compose_templates:
+      # ddclient (linuxserver image) chowns this bind-mounted file to its own uid on
+      # start, so we manage content only — preserve_perms avoids a perpetual flap.
+      - { src: ddclient.conf.j2, dest: ddclient.conf, preserve_perms: true }
+      - { src: dynamic/tls-options.yaml.j2, dest: dynamic/tls-options.yaml, mode: '0644' }
+      - { src: docker-compose.yml.j2, dest: docker-compose.yml }
+    # ddclient re-reads its config only on restart. traefik does NOT need a restart for
+    # dynamic/ changes — it hot-reloads them via `--providers.file.watch=true`, so we
+    # deliberately do not restart traefik here (avoids an ingress blip; the old handler
+    # force-recreated it on every config change).
+    compose_restart_services: ["ddclient"]
+
+# Confirm ingress is actually serving HTTPS (cheap no-op when already up; covers the
+# case where the deploy above recreated traefik on a compose change).
+- name: Wait for traefik to be serving HTTPS
+  ansible.builtin.wait_for:
+    port: 443
+    delay: 3
+    timeout: 30

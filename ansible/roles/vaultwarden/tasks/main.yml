@@ -1,0 +1,6 @@
+---
+- name: Deploy vaultwarden compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: vaultwarden

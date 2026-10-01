@@ -1,0 +1,36 @@
+---
+# Every local DNS record Pi-hole serves, each pointing at the Mini PC. Rendered into
+# FTLCONF_dns_hosts, so this list is authoritative: a hostname missing here has no
+# record, and the Pi-hole admin UI shows these records read-only. There is no *.home
+# wildcard, so each internal hostname needs its own entry. The apex-domain entries
+# would otherwise hairpin through the public IP.
+pihole_dns_hosts:
+  - "auth.{{ domain }}"
+  - "daily-mcp.{{ domain }}"
+  - "vpn.{{ domain }}"
+  - "auth.{{ internal_subdomain }}.{{ domain }}"
+  - "bw.{{ internal_subdomain }}.{{ domain }}"
+  - "daily.{{ internal_subdomain }}.{{ domain }}"
+  - "dash.{{ internal_subdomain }}.{{ domain }}"
+  - "gitlab.{{ internal_subdomain }}.{{ domain }}"
+  - "gym-bro.{{ internal_subdomain }}.{{ domain }}"
+  - "harbor.{{ internal_subdomain }}.{{ domain }}"
+  - "headscale.{{ internal_subdomain }}.{{ domain }}"
+  - "library.{{ internal_subdomain }}.{{ domain }}"
+  - "media.{{ internal_subdomain }}.{{ domain }}"
+  - "minipc.{{ internal_subdomain }}.{{ domain }}"
+  - "monitoring.{{ internal_subdomain }}.{{ domain }}"
+  - "paper.{{ internal_subdomain }}.{{ domain }}"
+  - "pihole.{{ internal_subdomain }}.{{ domain }}"
+  - "registry.{{ internal_subdomain }}.{{ domain }}"
+  - "traefik.{{ internal_subdomain }}.{{ domain }}"
+  - "vault.{{ internal_subdomain }}.{{ domain }}"
+  - "vpn.{{ internal_subdomain }}.{{ domain }}"
+  - "ytdl.{{ internal_subdomain }}.{{ domain }}"
+
+# Local DNS records for hosts that are not the Mini PC, as {host, ip}. Same rules as
+# pihole_dns_hosts: authoritative, rendered into FTLCONF_dns_hosts, checked after deploy.
+pihole_dns_records:
+  # OpenChamber on the atlas dev-lab VM: its own Traefik, on the LAN and (via the
+  # subnet route) the tailnet.
+  - { host: "ai.{{ internal_subdomain }}.{{ domain }}", ip: "{{ dev_lab_ip }}" }

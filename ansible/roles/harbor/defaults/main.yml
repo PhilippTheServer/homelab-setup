@@ -1,0 +1,4 @@
+---
+# How long a Harbor UI login lasts, in minutes (Harbor's own default is 60). Kept in step
+# with the one-week Keycloak session.
+harbor_session_timeout_minutes: 10080

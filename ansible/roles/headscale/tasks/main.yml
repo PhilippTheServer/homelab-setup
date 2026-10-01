@@ -1,0 +1,17 @@
+---
+- name: Deploy headscale compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: headscale
+    compose_dirs: ["", "config"]
+    compose_templates:
+      - { src: config.yaml.j2, dest: config/config.yaml }
+      - { src: acl.hujson.j2, dest: config/acl.hujson }
+      - { src: headplane.yaml.j2, dest: headplane.yaml }
+      - { src: docker-compose.yml.j2, dest: docker-compose.yml }
+    # config/ and headplane.yaml are bind-mounted read-only into both containers; restart
+    # them when a config file changes but the compose file itself did not. (The old role
+    # only restarted on config.yaml — headplane.yaml had no notify, a latent omission now
+    # covered here.)
+    compose_restart_services: ["headscale", "headplane"]

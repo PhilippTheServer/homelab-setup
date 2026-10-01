@@ -1,0 +1,39 @@
+---
+services:
+
+  vault:
+    image: hashicorp/vault:{{ hcvault_version }}
+    container_name: vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK   # prevents secrets from being swapped to disk
+    command: server
+    environment:
+      VAULT_ADDR: "http://0.0.0.0:8200"
+      VAULT_API_ADDR: "https://vault.{{ internal_subdomain }}.{{ domain }}"
+    volumes:
+      - {{ homelab_base_dir }}/services/hcvault/config:/vault/config:ro
+      - vault_data:/vault/data
+      - vault_logs:/vault/logs
+    dns:
+      - {{ minipc_ip }}
+      - 1.1.1.1
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.vault.rule=Host(`vault.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.vault.entrypoints=websecure"
+      - "traefik.http.routers.vault.tls.certresolver=letsencrypt"
+      - "traefik.http.services.vault.loadbalancer.server.port=8200"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  vault_data:
+    name: vault_data
+  vault_logs:
+    name: vault_logs

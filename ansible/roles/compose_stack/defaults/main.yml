@@ -1,0 +1,36 @@
+---
+# Shared deploy primitive for Docker-Compose services. Callers set `compose_service`
+# (required) and override the vars below as needed via `include_role: vars:`.
+
+# Subdirectories created UNDER the service dir
+# ({{ homelab_base_dir }}/services/{{ compose_service }}). "" == the service dir itself.
+compose_dirs: [""]
+
+# Absolute directories to create (siblings of services/, e.g. media mounts).
+compose_extra_dirs: []
+
+# Mode for all directories created by this role. Override to 0755 when a container user
+# (e.g. grafana uid 472) must traverse/read bind-mounted config dirs owned by deploy_user.
+compose_dir_mode: '0750'
+
+# Templates to render. `src` is relative to services/{{ compose_service }}/ in the repo;
+# `dest` is relative to the service dir on the host. `mode` defaults to 0640.
+compose_templates:
+  - { src: docker-compose.yml.j2, dest: docker-compose.yml }
+
+# docker_compose_v2 behaviour.
+#   recreate: auto  -> recreate a container only when its compose definition changed
+#   pull:     missing -> pull only if the image is absent (matches `docker compose up -d`)
+compose_recreate: auto
+compose_pull: missing
+
+# Wait for every container to be running (and healthy, where it has a healthcheck) and
+# fail the play if that doesn't happen within compose_wait_timeout seconds. Off by
+# default: without it `up -d` returns as soon as containers are created.
+compose_wait: false
+compose_wait_timeout: 300
+
+# Services that read bind-mounted config files. Each is restarted when its container
+# started before the stack's newest rendered config file (anything but
+# docker-compose.yml) was written. Empty = nothing to restart.
+compose_restart_services: []

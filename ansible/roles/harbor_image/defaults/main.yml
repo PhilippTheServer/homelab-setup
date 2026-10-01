@@ -1,0 +1,15 @@
+---
+# Harbor coordinates. `registry.` is the CLI/pull endpoint; `harbor.` is the UI and API,
+# reachable on the host without going through Traefik.
+harbor_image_registry: "registry.{{ internal_subdomain }}.{{ domain }}"
+harbor_image_api: "https://harbor.{{ internal_subdomain }}.{{ domain }}/api/v2.0"
+
+# Where the source tarball is unpacked and the images are built on the Mini PC.
+harbor_image_build_dir: "{{ homelab_base_dir }}/build/{{ harbor_image_name }}"
+
+# Each component is built from {{ harbor_image_build_dir }}/<prefix><component>
+# (e.g. gym-bro keeps its sources in gym-bro-backend/ and gym-bro-frontend/).
+harbor_image_context_prefix: ""
+
+# Rebuild and overwrite an existing tag.
+harbor_image_force_build: false

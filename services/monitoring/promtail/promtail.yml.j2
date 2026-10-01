@@ -1,0 +1,66 @@
+server:
+  http_listen_port: 9080
+  grpc_listen_port: 0
+
+positions:
+  filename: /tmp/positions.yaml
+
+clients:
+  - url: http://loki:3100/loki/api/v1/push
+
+scrape_configs:
+  - job_name: docker
+    docker_sd_configs:
+      - host: unix:///var/run/docker.sock
+        refresh_interval: 5s
+    relabel_configs:
+      - target_label: job
+        replacement: docker
+      - source_labels: ['__meta_docker_container_name']
+        regex: '/(.*)'
+        target_label: container
+      - source_labels: ['__meta_docker_container_log_stream']
+        target_label: logstream
+      - source_labels: ['__meta_docker_container_image']
+        target_label: image
+    pipeline_stages:
+      - match:
+          selector: '{container="traefik"}'
+          stages:
+            # Set job="traefik" so dashboard 13713 queries match
+            - static_labels:
+                job: traefik
+            # Parse JSON access log fields — dashboard uses | json in LogQL queries
+            - json:
+                expressions:
+                  status: DownstreamStatus
+                  method: RequestMethod
+            - labels:
+                status:
+                method:
+            # Drop internal dashboard health polling noise
+            - drop:
+                expression: '"RouterName":"traefik-dashboard@docker"'
+
+      - match:
+          selector: '{container="gitlab"}'
+          stages:
+            # Drop INFO-level structured logs (sidekiq jobs, rails requests, workhorse access)
+            - drop:
+                expression: '"severity":"INFO"'
+            - drop:
+                expression: '"level":"info"'
+            # Drop nginx access log lines for internal health probes
+            - drop:
+                expression: '"(GET|HEAD) /-/(health|readiness|liveness|metrics)'
+            # Drop internal curl health check requests (GitLab self-checks)
+            - drop:
+                expression: 'curl/.*-DEV'
+            # Drop Chef reconfigure noise (container startup)
+            - drop:
+                expression: '^\[20\d\d-.*\] INFO:'
+            # Drop log file section headers and blank lines
+            - drop:
+                expression: '^==> /var/log/gitlab/'
+            - drop:
+                expression: '^\s*$'

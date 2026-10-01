@@ -1,0 +1,195 @@
+---
+# ── Registry: make sure the project and the requested image version exist ──────
+
+- name: gym-bro | ensure the Harbor project exists
+  ansible.builtin.uri:
+    url: "{{ gym_bro_harbor_api }}/projects"
+    method: POST
+    user: admin
+    password: "{{ vault_harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      project_name: "{{ gym_bro_harbor_project }}"
+      public: false
+    status_code: [201, 409]
+  register: _gym_bro_project
+  changed_when: _gym_bro_project.status == 201
+  no_log: true
+
+- name: gym-bro | check which image tags Harbor already holds
+  ansible.builtin.uri:
+    url: >-
+      {{ gym_bro_harbor_api }}/projects/{{ gym_bro_harbor_project }}/repositories/{{ item }}/artifacts/{{ gym_bro_version }}
+    method: GET
+    user: admin
+    password: "{{ vault_harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: _gym_bro_artifacts
+  loop: [backend, frontend]
+  no_log: true
+  # uri does not support check mode and would be skipped, leaving no `status` for the
+  # build decision below. This is a read-only GET, so a dry run can safely perform it.
+  check_mode: false
+
+- name: gym-bro | decide whether an image build is needed
+  ansible.builtin.set_fact:
+    # `| bool` matters: -e gym_bro_force_build=true arrives as the string "true", and a
+    # conditional that evaluates to a string is an error under strict conditionals.
+    _gym_bro_build_needed: >-
+      {{ (gym_bro_force_build | bool)
+         or (_gym_bro_artifacts.results | selectattr('status', 'equalto', 404) | list | length > 0) }}
+
+- name: gym-bro | report the build decision
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Building gym-bro ' ~ gym_bro_version ~ ' — not present in Harbor (or forced).'
+         if (_gym_bro_build_needed | bool)
+         else 'gym-bro ' ~ gym_bro_version ~ ' already in Harbor, skipping build.' }}
+
+# ── Build: ship the source to the Mini PC and build there ─────────────────────
+# Building on the target keeps the images native amd64 (no cross-arch emulation from
+# an Apple Silicon control machine) and keeps every step inside Ansible.
+
+- name: gym-bro | build and publish images
+  when: _gym_bro_build_needed | bool
+  block:
+    - name: gym-bro | assert the source directory exists on the control machine
+      ansible.builtin.stat:
+        path: "{{ gym_bro_source_dir }}/gym-bro-backend/pyproject.toml"
+      delegate_to: localhost
+      become: false
+      register: _gym_bro_src
+
+    - name: gym-bro | fail early when the source is missing
+      ansible.builtin.fail:
+        msg: >-
+          gym-bro source not found at {{ gym_bro_source_dir }}. Clone
+          github.com/PhilippTheServer/gym-bro next to this repo, or set
+          gym_bro_source_dir.
+      when: not _gym_bro_src.stat.exists
+
+    - name: gym-bro | refuse to publish a tag the source does not declare
+      ansible.builtin.assert:
+        that: _gym_bro_source_version == gym_bro_version
+        fail_msg: >-
+          gym_bro_version is {{ gym_bro_version }}, but the source at
+          {{ gym_bro_source_dir }} declares '{{ _gym_bro_source_version }}' in
+          gym-bro-backend/pyproject.toml. Release that version in gym-bro first, or
+          check out the commit that declares it.
+        quiet: true
+      vars:
+        _gym_bro_source_version: >-
+          {{ lookup('ansible.builtin.file', gym_bro_source_dir ~ '/gym-bro-backend/pyproject.toml')
+             | regex_search('(?m)^version = "[^"]+"')
+             | default('', true)
+             | regex_replace('^version = "|"$', '') }}
+
+    - name: gym-bro | package the source
+      ansible.builtin.command:
+        cmd: >-
+          tar --exclude=.git --exclude=node_modules --exclude=.venv --exclude=dist
+              --exclude=.angular --exclude=__pycache__ --exclude=.env --exclude=._*
+              -czf {{ _gym_bro_tarball }} -C {{ gym_bro_source_dir }} .
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      vars:
+        _gym_bro_tarball: "/tmp/gym-bro-{{ gym_bro_version }}.tar.gz"
+      environment:
+        # macOS ships BSD tar, which stores extended attributes as AppleDouble "._name"
+        # sidecar files. Alembic globs *.py in alembic/versions and tried to import the
+        # binary "._0001_initial_schema.py", failing with "source code string cannot
+        # contain null bytes". This is the documented way to suppress them.
+        COPYFILE_DISABLE: "1"
+
+    - name: gym-bro | start from a clean build directory
+      # unarchive overwrites but never deletes, so files dropped from the source tree
+      # (or written by an older, buggier package step) would linger between builds.
+      ansible.builtin.file:
+        path: "{{ gym_bro_build_dir }}"
+        state: absent
+
+    - name: gym-bro | create the build directory
+      ansible.builtin.file:
+        path: "{{ gym_bro_build_dir }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0750'
+
+    - name: gym-bro | upload and unpack the source
+      ansible.builtin.unarchive:
+        src: "/tmp/gym-bro-{{ gym_bro_version }}.tar.gz"
+        dest: "{{ gym_bro_build_dir }}"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+      # The tarball only exists once the package step has run, which check mode skips.
+      when: not ansible_check_mode
+
+    - name: gym-bro | log in to Harbor
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          printf '%s' '{{ vault_harbor_admin_password }}' |
+          docker login {{ gym_bro_registry }} --username admin --password-stdin
+        executable: /bin/bash
+      become_user: "{{ deploy_user }}"
+      changed_when: false
+      no_log: true
+
+    - name: gym-bro | build the images
+      ansible.builtin.command:
+        cmd: >-
+          docker build --pull
+            -t {{ item.image }}:{{ gym_bro_version }}
+            -t {{ item.image }}:latest
+            {{ gym_bro_build_dir }}/{{ item.context }}
+      become_user: "{{ deploy_user }}"
+      changed_when: true
+      loop:
+        - { image: "{{ gym_bro_image_backend }}", context: gym-bro-backend }
+        - { image: "{{ gym_bro_image_frontend }}", context: gym-bro-frontend }
+      loop_control:
+        label: "{{ item.context }}"
+
+    - name: gym-bro | push the images
+      ansible.builtin.command:
+        cmd: "docker push {{ item.0 }}:{{ item.1 }}"
+      become_user: "{{ deploy_user }}"
+      changed_when: true
+      loop: "{{ [gym_bro_image_backend, gym_bro_image_frontend] | product([gym_bro_version, 'latest']) | list }}"
+      loop_control:
+        label: "{{ item.0 }}:{{ item.1 }}"
+
+    - name: gym-bro | remove the uploaded source tarball
+      ansible.builtin.file:
+        path: "/tmp/gym-bro-{{ gym_bro_version }}.tar.gz"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+# The deploy user needs credentials for `docker compose pull` even when nothing was
+# built — for example on a fresh host pulling an image that is already in Harbor.
+- name: gym-bro | ensure the deploy user is logged in to Harbor
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      printf '%s' '{{ vault_harbor_admin_password }}' |
+      docker login {{ gym_bro_registry }} --username admin --password-stdin
+    executable: /bin/bash
+  become_user: "{{ deploy_user }}"
+  changed_when: false
+  no_log: true
+
+# ── Deploy ────────────────────────────────────────────────────────────────────
+
+- name: gym-bro | deploy the compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: gym-bro
+    # A failed migration crash-loops the backend; without waiting the play would
+    # still report success.
+    compose_wait: true

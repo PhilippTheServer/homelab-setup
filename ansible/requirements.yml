@@ -1,0 +1,15 @@
+---
+# Pinned to the latest released versions (policy: track latest, bump deliberately).
+# To bump: `ansible-galaxy collection install --force <name>` then update the pin
+# here to the installed version (`ansible-galaxy collection list`).
+collections:
+  # Vault secrets lookup (group_vars/all/vars.yml)
+  - name: community.hashi_vault
+    version: "7.1.0"
+  # `ufw` module (ufw role) — bundled with the full `ansible` package but NOT
+  # with ansible-core, which is what the control-node venv uses.
+  - name: community.general
+    version: "13.4.0"
+  # `docker_network` (traefik) + `docker_compose_v2` (compose_stack role)
+  - name: community.docker
+    version: "5.3.0"

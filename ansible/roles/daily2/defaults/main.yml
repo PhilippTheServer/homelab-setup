@@ -1,0 +1,26 @@
+---
+# Where the application source lives on the control machine. The default assumes the
+# daily2 repo is checked out next to this one; override with -e daily2_source_dir=…
+daily2_source_dir: "{{ playbook_dir }}/../../daily2"
+
+# Harbor coordinates. `registry.` is the CLI/pull endpoint; `harbor.` is the UI.
+daily2_registry: "registry.{{ internal_subdomain }}.{{ domain }}"
+daily2_harbor_project: "daily2"
+
+# Components built from the source's <component>/ directory and published as
+# {{ daily2_registry }}/{{ daily2_harbor_project }}/<component>.
+daily2_components:
+  - backend
+  - frontend
+
+# Where the source tarball is unpacked and images are built on the Mini PC.
+daily2_build_dir: "{{ homelab_base_dir }}/build/daily2"
+
+# Images are built only when daily2_version is absent from Harbor. Set this to rebuild
+# and overwrite an existing tag:
+#   ansible-playbook ansible/site.yml --tags daily2 -e daily2_force_build=true
+daily2_force_build: false
+
+# Public MCP endpoint (daily-mcp.{{ domain }}): source ranges the Traefik allowlist
+# lets through (group_vars).
+daily2_mcp_allowed_sources: "{{ mcp_allowed_sources }}"

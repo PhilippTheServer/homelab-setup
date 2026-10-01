@@ -1,0 +1,45 @@
+---
+# Mosquitto runs as its own uid (1883) — see docker-compose.yml.j2 — so the image
+# entrypoint skips its root-only `chown -R /mosquitto`. The password file must
+# therefore already be readable by uid 1883 when the stack comes up, so we render
+# it here (owned 1883:1883, mode 0700) *before* the compose_stack include. It is
+# bind-mounted read-only, so the container never writes it back and Ansible keeps
+# sole ownership of its perms — no idempotency flap.
+- name: Ensure mqtt config directory exists
+  ansible.builtin.file:
+    path: "{{ homelab_base_dir }}/services/mqtt/config"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "0755"
+
+- name: Render mosquitto password file (owned by mosquitto uid 1883, not world-readable)
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../services/mqtt/config/passwd.j2"
+    dest: "{{ homelab_base_dir }}/services/mqtt/config/passwd"
+    owner: "1883"
+    group: "1883"
+    mode: "0700"
+  register: _mqtt_passwd
+
+- name: Deploy mqtt (mosquitto) compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: mqtt
+    compose_dirs: ["", "config"]
+    compose_dir_mode: "0755"
+    compose_templates:
+      - { src: config/mosquitto.conf.j2, dest: config/mosquitto.conf, mode: "0644" }
+      - { src: docker-compose.yml.j2, dest: docker-compose.yml }
+    compose_restart_services: ["mosquitto"]
+
+# Rotate-password path: when the compose file is unchanged, the deploy above does
+# not recreate the container, so restart mosquitto to load the new password file.
+- name: Restart mosquitto when the password file changed
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_base_dir }}/services/mqtt"
+    state: restarted
+    services: ["mosquitto"]
+  become_user: "{{ deploy_user }}"
+  when: _mqtt_passwd is changed

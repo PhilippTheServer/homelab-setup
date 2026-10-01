@@ -1,0 +1,200 @@
+---
+- name: "harbor_image | assert the caller set every required variable"
+  ansible.builtin.assert:
+    that:
+      - harbor_image_name is defined
+      - harbor_image_project is defined
+      - harbor_image_version is defined
+      - harbor_image_components is defined
+      - harbor_image_components | length > 0
+      - harbor_image_source_dir is defined
+      - harbor_image_version_file is defined
+      - harbor_image_source_repo is defined
+    fail_msg: >-
+      harbor_image requires harbor_image_name, _project, _version, _components,
+      _source_dir, _version_file and _source_repo
+    quiet: true
+
+# ── Registry: make sure the project and the requested image version exist ──────
+
+- name: "{{ harbor_image_name }} | ensure the Harbor project exists"
+  ansible.builtin.uri:
+    url: "{{ harbor_image_api }}/projects"
+    method: POST
+    user: admin
+    password: "{{ vault_harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      project_name: "{{ harbor_image_project }}"
+      public: false
+    status_code: [201, 409]
+  register: _harbor_image_project
+  changed_when: _harbor_image_project.status == 201
+  no_log: true
+
+- name: "{{ harbor_image_name }} | check which image tags Harbor already holds"
+  ansible.builtin.uri:
+    url: >-
+      {{ harbor_image_api }}/projects/{{ harbor_image_project }}/repositories/{{ item }}/artifacts/{{ harbor_image_version }}
+    method: GET
+    user: admin
+    password: "{{ vault_harbor_admin_password }}"
+    force_basic_auth: true
+    status_code: [200, 404]
+  register: _harbor_image_artifacts
+  loop: "{{ harbor_image_components }}"
+  no_log: true
+  # uri does not support check mode and would be skipped, leaving no `status` for the
+  # build decision below. This is a read-only GET, so a dry run can safely perform it.
+  check_mode: false
+
+- name: "{{ harbor_image_name }} | decide whether an image build is needed"
+  ansible.builtin.set_fact:
+    # `| bool` matters: -e <name>_force_build=true arrives as the string "true", and a
+    # conditional that evaluates to a string is an error under strict conditionals.
+    _harbor_image_build_needed: >-
+      {{ (harbor_image_force_build | bool)
+         or (_harbor_image_artifacts.results | selectattr('status', 'equalto', 404) | list | length > 0) }}
+
+- name: "{{ harbor_image_name }} | report the build decision"
+  ansible.builtin.debug:
+    msg: >-
+      {{ 'Building ' ~ harbor_image_name ~ ' ' ~ harbor_image_version ~ ' — not present in Harbor (or forced).'
+         if (_harbor_image_build_needed | bool)
+         else harbor_image_name ~ ' ' ~ harbor_image_version ~ ' already in Harbor, skipping build.' }}
+
+# ── Build: ship the source to the Mini PC and build there ─────────────────────
+# Building on the target keeps the images native amd64 (no cross-arch emulation from
+# an Apple Silicon control machine) and keeps every step inside Ansible.
+
+- name: "{{ harbor_image_name }} | build and publish images"
+  when: _harbor_image_build_needed | bool
+  vars:
+    _harbor_image_tarball: "/tmp/{{ harbor_image_name }}-{{ harbor_image_version }}.tar.gz"
+    _harbor_image_version_path: "{{ harbor_image_source_dir }}/{{ harbor_image_version_file }}"
+  block:
+    - name: "{{ harbor_image_name }} | assert the source directory exists on the control machine"
+      ansible.builtin.stat:
+        path: "{{ _harbor_image_version_path }}"
+      delegate_to: localhost
+      become: false
+      register: _harbor_image_src
+
+    - name: "{{ harbor_image_name }} | fail early when the source is missing"
+      ansible.builtin.fail:
+        msg: >-
+          {{ harbor_image_name }} source not found at {{ harbor_image_source_dir }}. Clone
+          {{ harbor_image_source_repo }} there, or set the source directory variable.
+      when: not _harbor_image_src.stat.exists
+
+    - name: "{{ harbor_image_name }} | refuse to publish a tag the source does not declare"
+      ansible.builtin.assert:
+        that: _harbor_image_source_version == harbor_image_version
+        fail_msg: >-
+          {{ harbor_image_name }}_version is {{ harbor_image_version }}, but the source at
+          {{ harbor_image_source_dir }} declares '{{ _harbor_image_source_version }}' in
+          {{ harbor_image_version_file }}. Release that version first, or check out the
+          commit that declares it.
+        quiet: true
+      vars:
+        _harbor_image_source_version: >-
+          {{ lookup('ansible.builtin.file', _harbor_image_version_path)
+             | regex_search('(?m)^version = "[^"]+"')
+             | default('', true)
+             | regex_replace('^version = "|"$', '') }}
+
+    - name: "{{ harbor_image_name }} | package the source"
+      ansible.builtin.command:
+        cmd: >-
+          tar --exclude=.git --exclude=node_modules --exclude=.venv --exclude=dist
+              --exclude=.angular --exclude=out-tsc --exclude=__pycache__ --exclude=.env
+              --exclude=._*
+              -czf {{ _harbor_image_tarball }} -C {{ harbor_image_source_dir }} .
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      environment:
+        # macOS ships BSD tar, which stores extended attributes as AppleDouble "._name"
+        # sidecar files. Alembic globs *.py in alembic/versions and tried to import the
+        # binary "._0001_initial_schema.py", failing with "source code string cannot
+        # contain null bytes". This is the documented way to suppress them.
+        COPYFILE_DISABLE: "1"
+
+    - name: "{{ harbor_image_name }} | start from a clean build directory"
+      # unarchive overwrites but never deletes, so files dropped from the source tree
+      # (or written by an older, buggier package step) would linger between builds.
+      ansible.builtin.file:
+        path: "{{ harbor_image_build_dir }}"
+        state: absent
+
+    - name: "{{ harbor_image_name }} | create the build directory"
+      ansible.builtin.file:
+        path: "{{ harbor_image_build_dir }}"
+        state: directory
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+        mode: '0750'
+
+    - name: "{{ harbor_image_name }} | upload and unpack the source"
+      ansible.builtin.unarchive:
+        src: "{{ _harbor_image_tarball }}"
+        dest: "{{ harbor_image_build_dir }}"
+        owner: "{{ deploy_user }}"
+        group: "{{ deploy_user }}"
+      # The tarball only exists once the package step has run, which check mode skips.
+      when: not ansible_check_mode
+
+    - name: "{{ harbor_image_name }} | log in to Harbor"
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail &&
+          printf '%s' '{{ vault_harbor_admin_password }}' |
+          docker login {{ harbor_image_registry }} --username admin --password-stdin
+        executable: /bin/bash
+      become_user: "{{ deploy_user }}"
+      changed_when: false
+      no_log: true
+
+    - name: "{{ harbor_image_name }} | build the images"
+      ansible.builtin.command:
+        cmd: >-
+          docker build --pull
+            -t {{ harbor_image_registry }}/{{ harbor_image_project }}/{{ item }}:{{ harbor_image_version }}
+            -t {{ harbor_image_registry }}/{{ harbor_image_project }}/{{ item }}:latest
+            {{ harbor_image_build_dir }}/{{ harbor_image_context_prefix }}{{ item }}
+      become_user: "{{ deploy_user }}"
+      changed_when: true
+      loop: "{{ harbor_image_components }}"
+      loop_control:
+        label: "{{ harbor_image_context_prefix }}{{ item }}"
+
+    - name: "{{ harbor_image_name }} | push the images"
+      ansible.builtin.command:
+        cmd: >-
+          docker push {{ harbor_image_registry }}/{{ harbor_image_project }}/{{ item.0 }}:{{ item.1 }}
+      become_user: "{{ deploy_user }}"
+      changed_when: true
+      loop: "{{ harbor_image_components | product([harbor_image_version, 'latest']) | list }}"
+      loop_control:
+        label: "{{ item.0 }}:{{ item.1 }}"
+
+    - name: "{{ harbor_image_name }} | remove the uploaded source tarball"
+      ansible.builtin.file:
+        path: "{{ _harbor_image_tarball }}"
+        state: absent
+      delegate_to: localhost
+      become: false
+
+# The deploy user needs credentials for `docker compose pull` even when nothing was
+# built — for example on a fresh host pulling an image that is already in Harbor.
+- name: "{{ harbor_image_name }} | ensure the deploy user is logged in to Harbor"
+  ansible.builtin.shell:
+    cmd: >-
+      set -o pipefail &&
+      printf '%s' '{{ vault_harbor_admin_password }}' |
+      docker login {{ harbor_image_registry }} --username admin --password-stdin
+    executable: /bin/bash
+  become_user: "{{ deploy_user }}"
+  changed_when: false
+  no_log: true

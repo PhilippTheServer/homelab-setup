@@ -1,0 +1,106 @@
+---
+services:
+
+  gitlab:
+    image: gitlab/gitlab-ce:{{ gitlab_version }}
+    container_name: gitlab
+    restart: unless-stopped
+    hostname: "gitlab.{{ internal_subdomain }}.{{ domain }}"
+    shm_size: "256m"
+    environment:
+      GITLAB_OMNIBUS_CONFIG: |
+        external_url 'https://gitlab.{{ internal_subdomain }}.{{ domain }}'
+
+        # Let Traefik handle TLS — GitLab listens on plain HTTP
+        nginx['listen_port'] = 80
+        nginx['listen_https'] = false
+        nginx['proxy_set_headers'] = {
+          'X-Forwarded-Proto' => 'https',
+          'X-Forwarded-Ssl'   => 'on'
+        }
+
+        # Initial root password (only used on first run)
+        gitlab_rails['initial_root_password'] = '{{ vault_gitlab_root_password }}'
+
+        # Disable built-in Let's Encrypt (Traefik handles certs)
+        letsencrypt['enable'] = false
+
+        # Disable public registration — SSO only
+        gitlab_rails['gitlab_signup_enabled'] = false
+
+        # No SMTP configured — suppress email delivery errors
+        gitlab_rails['gitlab_email_enabled'] = false
+
+        # SSH git access (host port 2222 → container port 22)
+        gitlab_rails['gitlab_shell_ssh_port'] = 2222
+
+        # Keycloak OIDC SSO
+        gitlab_rails['omniauth_enabled'] = true
+        gitlab_rails['omniauth_allow_single_sign_on'] = ['openid_connect']
+        gitlab_rails['omniauth_sync_email_from_provider'] = 'openid_connect'
+        gitlab_rails['omniauth_auto_link_user'] = ['openid_connect']
+        gitlab_rails['omniauth_block_auto_created_users'] = false
+        gitlab_rails['omniauth_auto_sign_in_with_provider'] = 'openid_connect'
+        gitlab_rails['omniauth_providers'] = [
+          {
+            'name' => 'openid_connect',
+            'label' => 'Keycloak SSO',
+            'args' => {
+              'name' => 'openid_connect',
+              'scope' => ['openid', 'profile', 'email'],
+              'response_type' => 'code',
+              'issuer' => 'https://auth.{{ domain }}/realms/homelab',
+              'discovery' => true,
+              'client_auth_method' => 'query',
+              'uid_field' => 'preferred_username',
+              'client_options' => {
+                'identifier' => 'gitlab',
+                'secret' => '{{ vault_gitlab_oidc_secret }}',
+                'redirect_uri' => 'https://gitlab.{{ internal_subdomain }}.{{ domain }}/users/auth/openid_connect/callback'
+              }
+            }
+          }
+        ]
+
+        # Harbor as container registry
+        gitlab_rails['registry_enabled'] = false
+
+        # Reduce memory footprint for 16 GB host
+        puma['worker_processes'] = 2
+        puma['min_threads'] = 1
+        puma['max_threads'] = 4
+        sidekiq['concurrency'] = 5
+        prometheus_monitoring['enable'] = false
+
+        # Reduce log verbosity
+        gitlab_rails['log_level'] = 'warn'
+        gitaly['logging_level'] = 'warn'
+        gitlab_workhorse['log_level'] = 'error'
+        gitlab_shell['log_level'] = 'warn'
+    ports:
+      - "2222:22"
+    volumes:
+      - gitlab_config:/etc/gitlab
+      - gitlab_logs:/var/log/gitlab
+      - gitlab_data:/var/opt/gitlab
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gitlab.rule=Host(`gitlab.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.gitlab.entrypoints=websecure"
+      - "traefik.http.routers.gitlab.tls.certresolver=letsencrypt"
+      - "traefik.http.services.gitlab.loadbalancer.server.port=80"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  gitlab_config:
+    name: gitlab_config
+  gitlab_logs:
+    name: gitlab_logs
+  gitlab_data:
+    name: gitlab_data

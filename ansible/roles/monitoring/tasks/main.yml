@@ -1,0 +1,141 @@
+---
+- name: Deploy monitoring compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: monitoring
+    # 0755 so container users (grafana uid 472, etc.) can traverse/read the bind-mounted
+    # config + provisioning dirs owned by deploy_user.
+    compose_dir_mode: '0755'
+    compose_dirs:
+      - ""
+      - grafana/provisioning/datasources
+      - grafana/provisioning/dashboards
+      - grafana/dashboards
+      # Staging dir for downloaded dashboard sources. MUST live outside grafana/dashboards:
+      # Grafana provisions every *.json there (dotfiles included), so a staging copy with
+      # the same uid would be a duplicate and freeze the whole dashboard provider.
+      - dashboard-sources
+      - prometheus
+      - loki
+      - promtail
+      - tempo
+    compose_templates:
+      - { src: prometheus/prometheus.yml.j2, dest: prometheus/prometheus.yml, mode: '0644' }
+      - { src: loki/loki.yml.j2, dest: loki/loki.yml, mode: '0644' }
+      - { src: promtail/promtail.yml.j2, dest: promtail/promtail.yml, mode: '0644' }
+      - { src: tempo/tempo.yml.j2, dest: tempo/tempo.yml, mode: '0644' }
+      - { src: grafana/provisioning/datasources/datasources.yml.j2, dest: grafana/provisioning/datasources/datasources.yml, mode: '0644' }
+      - { src: grafana/provisioning/dashboards/dashboards.yml.j2, dest: grafana/provisioning/dashboards/dashboards.yml, mode: '0644' }
+      - { src: docker-compose.yml.j2, dest: docker-compose.yml }
+    # These services read bind-mounted config files; restart them when a config-only
+    # change occurs (compose file unchanged). Grafana dashboards are auto-reloaded by the
+    # provisioning provider, so dashboard JSON changes (below) need no restart.
+    compose_restart_services: [prometheus, loki, promtail, tempo, grafana]
+
+# Grafana dashboards — provisioned from disk and hot-reloaded by Grafana, so no restart.
+# Kept bespoke (copy + downloads + JSON fix-ups don't fit the template pattern).
+- name: Copy the dashboards kept in this repo
+  ansible.builtin.copy:
+    src: "{{ playbook_dir }}/../services/monitoring/grafana/dashboards/{{ item }}"
+    dest: "{{ homelab_base_dir }}/services/monitoring/grafana/dashboards/{{ item }}"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+  loop:
+    - container-logs.json
+    - keycloak.json
+
+# get_url sends a request even when dest exists and force is false — a HEAD in check
+# mode, which grafana.com answers with 405 — so, as in the harbor role, only download
+# dashboards that are missing. The Traefik Loki one goes to an UNMODIFIED staging file
+# (kept OUTSIDE the provisioned dashboards dir, see dashboard-sources note above) and
+# the fixed version is written below; editing a get_url dest in place would flap.
+- name: Check which grafana.com dashboards are already downloaded
+  ansible.builtin.stat:
+    path: "{{ homelab_base_dir }}/services/monitoring/{{ item.dest }}"
+  register: _downloaded_dashboards
+  loop:
+    - { id: 1860, dest: grafana/dashboards/node-exporter-full.json }
+    - { id: 17346, dest: grafana/dashboards/traefik.json }
+    - { id: 13713, dest: dashboard-sources/traefik-loki.upstream.json }
+  loop_control:
+    label: "{{ item.dest }}"
+
+- name: Download missing grafana.com dashboards
+  ansible.builtin.get_url:
+    url: "https://grafana.com/api/dashboards/{{ item.item.id }}/revisions/latest/download"
+    dest: "{{ homelab_base_dir }}/services/monitoring/{{ item.item.dest }}"
+    mode: '0644'
+  loop: "{{ _downloaded_dashboards.results }}"
+  loop_control:
+    label: "{{ item.item.dest }}"
+  when: not item.stat.exists
+
+# Remove the old staging file that an earlier version placed INSIDE the provisioned
+# dashboards dir — Grafana read it as a duplicate-uid dashboard and froze the provider.
+- name: Remove stray dashboard staging file from provisioned dir
+  ansible.builtin.file:
+    path: "{{ homelab_base_dir }}/services/monitoring/grafana/dashboards/.traefik-loki.upstream.json"
+    state: absent
+
+- name: Read upstream Traefik Loki dashboard
+  ansible.builtin.slurp:
+    src: "{{ homelab_base_dir }}/services/monitoring/dashboard-sources/traefik-loki.upstream.json"
+  register: _traefik_loki_raw
+
+# The upstream dashboard references its Loki datasource via the grafana.com import
+# placeholder "${DS_LOKI}" (a string). File-provisioned Grafana does not process the
+# __inputs import mechanism, and a bare string datasource resolves by NAME ("Loki"),
+# which does not match. Replace the whole quoted token with the datasource object
+# {"type":"loki","uid":"loki"} — the form Grafana actually resolves (and the form our
+# working dashboards use). Also rewrite the job selector for our Docker-label setup.
+- name: Write fixed Traefik Loki dashboard (datasource ref + job selector)
+  ansible.builtin.copy:
+    dest: "{{ homelab_base_dir }}/services/monitoring/grafana/dashboards/traefik-loki.json"
+    content: "{{ _traefik_loki_raw.content | b64decode | regex_replace('\"\\$\\{DS_LOKI\\}\"', '{\"type\": \"loki\", \"uid\": \"loki\"}') | regex_replace('/var/log/traefik\\.log', 'traefik') }}"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0644'
+
+# The Keycloak dashboard is empty unless all three of its sources flow: the scrape, the
+# per-client event metrics and the INFO-level event log. Prometheus can reach both
+# itself and Loki, so every query runs from inside its container. Read-only, so a dry
+# run reports a gap without aborting the play.
+- name: Check Prometheus has Keycloak's metrics
+  ansible.builtin.command:
+    cmd: >-
+      docker exec prometheus wget -qO-
+      "http://localhost:9090/api/v1/query?query={{ item.query | urlencode }}"
+  become_user: "{{ deploy_user }}"
+  register: _keycloak_metrics
+  changed_when: false
+  check_mode: false
+  retries: "{{ 0 if ansible_check_mode else 8 }}"
+  delay: 15
+  until: (_keycloak_metrics.stdout | from_json).data.result | length > 0
+  failed_when: (_keycloak_metrics.stdout | from_json).data.result | length == 0
+  ignore_errors: "{{ ansible_check_mode }}"
+  loop:
+    - { name: keycloak target up, query: 'up{job="keycloak"} == 1' }
+    - { name: user event metrics, query: 'keycloak_user_events_total' }
+  loop_control:
+    label: "{{ item.name }}"
+
+- name: Check Loki has Keycloak's INFO event log
+  ansible.builtin.command:
+    cmd: >-
+      docker exec prometheus wget -qO-
+      "http://loki:3100/loki/api/v1/query_range?limit=1&since=1h&query={{ _keycloak_event_query | urlencode }}"
+  vars:
+    # Keycloak pads the level to five characters, hence the two spaces.
+    _keycloak_event_query: '{container="keycloak"} |= "INFO  [org.keycloak.events]"'
+  become_user: "{{ deploy_user }}"
+  register: _keycloak_event_log
+  changed_when: false
+  check_mode: false
+  retries: "{{ 0 if ansible_check_mode else 8 }}"
+  delay: 15
+  until: (_keycloak_event_log.stdout | from_json).data.result | length > 0
+  failed_when: (_keycloak_event_log.stdout | from_json).data.result | length == 0
+  ignore_errors: "{{ ansible_check_mode }}"

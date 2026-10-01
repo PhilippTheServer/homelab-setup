@@ -1,0 +1,32 @@
+---
+- name: Deploy metube compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: metube
+    compose_dirs: ["", "state"]
+    compose_extra_dirs:
+      - "{{ jellyfin_media_root }}/{{ metube_temp_subdir }}"
+    compose_wait: true
+
+# yt-dlp only moves the finished file into the library atomically while both paths are
+# on one filesystem; across a mount boundary rename() fails with EXDEV and it falls back
+# to a copy Jellyfin's realtime monitor can catch half-written. Mounting a separate disk
+# at library/ would do exactly that, so compare the device numbers rather than trust it.
+- name: metube | confirm the library and staging trees share one filesystem
+  ansible.builtin.command:
+    cmd: >-
+      stat -c %d
+      {{ jellyfin_media_root }}/{{ metube_library_subdir }}
+      {{ jellyfin_media_root }}/{{ metube_temp_subdir }}
+  register: _metube_devices
+  changed_when: false
+  failed_when: _metube_devices.stdout_lines | unique | length != 1
+  when: not ansible_check_mode
+
+- name: metube | check the web UI answers through Traefik
+  ansible.builtin.uri:
+    url: "https://{{ metube_host }}/"
+    status_code: 200
+  changed_when: false
+  when: not ansible_check_mode

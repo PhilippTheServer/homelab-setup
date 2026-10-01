@@ -1,0 +1,125 @@
+---
+services:
+
+  paperless:
+    image: ghcr.io/paperless-ngx/paperless-ngx:{{ paperless_version }}
+    container_name: paperless
+    restart: unless-stopped
+    depends_on:
+      paperless-db:
+        condition: service_healthy
+      paperless-redis:
+        condition: service_healthy
+      gotenberg:
+        condition: service_started
+      tika:
+        condition: service_started
+    environment:
+      PAPERLESS_REDIS: redis://paperless-redis:6379
+      # v3 no longer infers the engine from DBHOST; without this it falls back to
+      # SQLite and comes up as a fresh install pointed at no data.
+      PAPERLESS_DBENGINE: postgresql
+      PAPERLESS_DBHOST: paperless-db
+      PAPERLESS_DBNAME: paperless
+      PAPERLESS_DBUSER: paperless
+      PAPERLESS_DBPASS: "{{ vault_paperless_db_password }}"
+      PAPERLESS_SECRET_KEY: "{{ vault_paperless_secret_key }}"
+      PAPERLESS_URL: "https://paper.{{ internal_subdomain }}.{{ domain }}"
+      PAPERLESS_TIKA_ENABLED: 1
+      PAPERLESS_TIKA_GOTENBERG_ENDPOINT: http://gotenberg:3000
+      PAPERLESS_TIKA_ENDPOINT: http://tika:9998
+      PAPERLESS_TIME_ZONE: Europe/Berlin
+      PAPERLESS_OCR_LANGUAGE: deu+eng
+      PAPERLESS_ADMIN_USER: admin
+      PAPERLESS_ADMIN_PASSWORD: "{{ vault_paperless_admin_password }}"
+      PAPERLESS_ADMIN_MAIL: "{{ traefik_acme_email }}"
+      # OIDC via Keycloak
+      PAPERLESS_APPS: allauth.socialaccount.providers.openid_connect
+      PAPERLESS_DISABLE_REGULAR_LOGIN: "true"
+      PAPERLESS_REDIRECT_LOGIN_TO_SSO: "true"
+      PAPERLESS_SOCIALACCOUNT_ALLOW_SIGNUPS: "false"
+      PAPERLESS_SOCIALACCOUNT_PROVIDERS: '{"openid_connect": {"APPS": [{"provider_id": "keycloak", "name": "Keycloak", "client_id": "paperless", "secret": "{{ vault_paperless_oidc_secret }}", "settings": {"server_url": "https://auth.{{ domain }}/realms/homelab"}}], "OAUTH_PKCE_ENABLED": true}}'
+    volumes:
+      - paperless_data:/usr/src/paperless/data
+      - paperless_media:/usr/src/paperless/media
+      - paperless_export:/usr/src/paperless/export
+      - paperless_consume:/usr/src/paperless/consume
+    networks:
+      - proxy
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.paperless.rule=Host(`paper.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.paperless.entrypoints=websecure"
+      - "traefik.http.routers.paperless.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.paperless.service=paperless"
+      - "traefik.http.services.paperless.loadbalancer.server.port=8000"
+      - "traefik.docker.network=proxy"
+
+  paperless-db:
+    image: postgres:{{ postgres_version }}
+    container_name: paperless-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: paperless
+      POSTGRES_USER: paperless
+      POSTGRES_PASSWORD: "{{ vault_paperless_db_password }}"
+    volumes:
+      - paperless_db:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperless -d paperless"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+  paperless-redis:
+    image: redis:{{ redis_version }}
+    container_name: paperless-redis
+    restart: unless-stopped
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  gotenberg:
+    image: gotenberg/gotenberg:{{ gotenberg_version }}
+    container_name: paperless-gotenberg
+    restart: unless-stopped
+    command:
+      - gotenberg
+      - --chromium-disable-javascript=true
+      - --chromium-allow-list=file:///tmp/.*
+    networks:
+      - internal
+
+  tika:
+    image: apache/tika:{{ tika_version }}
+    container_name: paperless-tika
+    restart: unless-stopped
+    networks:
+      - internal
+
+networks:
+  proxy:
+    external: true
+  internal:
+    name: paperless_internal
+    internal: true
+
+volumes:
+  paperless_data:
+    name: paperless_data
+  paperless_media:
+    name: paperless_media
+  paperless_export:
+    name: paperless_export
+  paperless_consume:
+    name: paperless_consume
+  paperless_db:
+    name: paperless_db

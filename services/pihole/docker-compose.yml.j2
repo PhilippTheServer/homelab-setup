@@ -1,0 +1,31 @@
+---
+# Pi-hole runs with network_mode: host — required for DHCP broadcast.
+# This means it is NOT routed through Traefik. Access the admin UI directly:
+#   http://{{ minipc_ip }}:8080
+# Traefik owns ports 80 and 443; Pi-hole web UI is on 8080 to avoid conflict.
+
+services:
+
+  pihole:
+    container_name: pihole
+    image: pihole/pihole:{{ pihole_version }}
+    network_mode: host
+    environment:
+      TZ: "Europe/Berlin"
+      FTLCONF_webserver_api_password: "{{ vault_pihole_webpassword }}"
+      FTLCONF_webserver_port: "8080"
+      FTLCONF_dns_listeningMode: "all"
+      FTLCONF_dns_hosts: |-
+{% for host in pihole_dns_hosts %}
+        {{ minipc_ip }} {{ host }}
+{% endfor %}
+{% for record in pihole_dns_records %}
+        {{ record.ip }} {{ record.host }}
+{% endfor %}
+    volumes:
+      - "{{ homelab_base_dir }}/services/pihole/etc-pihole:/etc/pihole"
+    cap_add:
+      - NET_ADMIN   # required for DHCP
+      - SYS_TIME
+      - SYS_NICE
+    restart: unless-stopped

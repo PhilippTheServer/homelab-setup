@@ -1,0 +1,94 @@
+---
+services:
+
+  traefik:
+    image: traefik:{{ traefik_version }}
+    container_name: traefik
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    command:
+      # API / Dashboard
+      - --api.dashboard=true
+      # Docker provider — only expose containers with traefik.enable=true
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=proxy
+      # Entrypoints
+      - --entrypoints.web.address=:80
+      - --entrypoints.web.http.redirections.entrypoint.to=websecure
+      - --entrypoints.web.http.redirections.entrypoint.scheme=https
+      - --entrypoints.websecure.address=:443
+      # MQTT over TLS — raw TCP entrypoint; a TCP router on the mosquitto container
+      # terminates TLS here with the *.home wildcard cert and forwards to :1883.
+      - --entrypoints.mqtt.address=:8883
+      - --providers.file.directory=/etc/traefik/dynamic
+      - --providers.file.watch=true
+      # Let's Encrypt via Namecheap DNS challenge
+      - --certificatesresolvers.letsencrypt.acme.email={{ traefik_acme_email }}
+      - --certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge=true
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge.provider=namecheap
+      - --certificatesresolvers.letsencrypt.acme.dnschallenge.resolvers=1.1.1.1:53,8.8.8.8:53
+{% if letsencrypt_staging %}
+      - --certificatesresolvers.letsencrypt.acme.caserver=https://acme-staging-v02.api.letsencrypt.org/directory
+{% endif %}
+      - --log.level=INFO
+      # Structured JSON access logs — traceID field links to Tempo in Grafana
+      - --accesslog=true
+      - --accesslog.format=json
+      - --accesslog.bufferingsize=100
+      # Prometheus metrics endpoint (internal, scraped by monitoring stack)
+      - --metrics.prometheus=true
+      - --entrypoints.metrics.address=:8082
+      - --metrics.prometheus.entryPoint=metrics
+      - --metrics.prometheus.addRoutersLabels=true
+      - --metrics.prometheus.addServicesLabels=true
+      - --metrics.prometheus.addEntryPointsLabels=true
+      # OTLP tracing → Tempo (reachable via proxy network)
+      - --tracing.serviceName=traefik
+      - --tracing.otlp.grpc.endpoint=tempo:4317
+      - --tracing.otlp.grpc.insecure=true
+    environment:
+      NAMECHEAP_API_USER: "{{ vault_namecheap_api_user }}"
+      NAMECHEAP_API_KEY: "{{ vault_namecheap_api_key }}"
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8883:8883"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - traefik_letsencrypt:/letsencrypt
+      - {{ homelab_base_dir }}/services/traefik/dynamic:/etc/traefik/dynamic
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      # Request wildcard cert for *.home.<domain> — all internal services share it
+      - "traefik.http.routers.traefik-dashboard.rule=Host(`traefik.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.traefik-dashboard.entrypoints=websecure"
+      - "traefik.http.routers.traefik-dashboard.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.traefik-dashboard.tls.domains[0].main={{ internal_subdomain }}.{{ domain }}"
+      - "traefik.http.routers.traefik-dashboard.tls.domains[0].sans=*.{{ internal_subdomain }}.{{ domain }}"
+      - "traefik.http.routers.traefik-dashboard.service=api@internal"
+      - "traefik.http.routers.traefik-dashboard.middlewares=traefik-auth@docker"
+      - "traefik.http.middlewares.traefik-auth.basicauth.users={{ vault_traefik_dashboard_auth | replace('$', '$$') }}"
+      - "traefik.http.services.traefik-dashboard.loadbalancer.server.port=8080"
+
+  ddclient:
+    image: lscr.io/linuxserver/ddclient:{{ ddclient_version }}
+    container_name: ddclient
+    restart: unless-stopped
+    volumes:
+      - {{ homelab_base_dir }}/services/traefik/ddclient.conf:/config/ddclient.conf
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  traefik_letsencrypt:
+    name: traefik_letsencrypt

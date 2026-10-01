@@ -1,0 +1,27 @@
+// Tailnet access policy, rendered by the headscale role (see its README).
+// Check a change before deploying it: headscale policy check --file <file>
+{
+  "groups": {
+    // Referenced by OIDC provider identifier (issuer/sub + "@"), which never changes.
+    "group:admins": {{ headscale_admins | to_json }},
+    "group:exit-node": {{ headscale_exit_node_users | to_json }},
+  },
+  "hosts": {
+    // The Mini PC's LAN address, reached through the 192.168.178.0/24 route it serves.
+    "minipc-lan": "{{ minipc_ip }}/32",
+  },
+  // The Mini PC advertises itself as an exit node (tailscale-client role); approve it
+  // without a manual step.
+  "autoApprovers": {
+    "exitNode": ["group:admins"],
+  },
+  "acls": [
+    // Admins: every node, and the whole home LAN through the Mini PC's route.
+    {"action": "accept", "src": ["group:admins"], "dst": ["*:*"]},
+    // Every other member: Traefik (gym-bro; every other app behind it requires the
+    // Keycloak realm role admin) and Pi-hole, which answers the split-DNS *.home names.
+    {"action": "accept", "src": ["autogroup:member"], "dst": ["minipc-lan:443,53"]},
+    // Exit-node users: the internet, through the Mini PC's exit node.
+    {"action": "accept", "src": ["group:exit-node"], "dst": ["autogroup:internet:*"]},
+  ],
+}

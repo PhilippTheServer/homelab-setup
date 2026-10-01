@@ -1,0 +1,121 @@
+---
+- Media:
+    - Jellyfin:
+        href: "https://media.{{ internal_subdomain }}.{{ domain }}"
+        description: Media Server
+        icon: jellyfin.png
+        widget:
+          type: jellyfin
+          url: "http://jellyfin:8096"
+          key: "{{ vault_jellyfin_api_key }}"
+          enableBlocks: true
+          enableNowPlaying: true
+
+    - MeTube:
+        href: "https://ytdl.{{ internal_subdomain }}.{{ domain }}"
+        description: YouTube → Jellyfin music library
+        icon: metube.png
+
+    - library:
+        href: "https://library.{{ internal_subdomain }}.{{ domain }}"
+        description: RSS Reader
+        icon: mdi-rss
+
+- Documents:
+    - Paperless-ngx:
+        href: "https://paper.{{ internal_subdomain }}.{{ domain }}"
+        description: Document Management & OCR
+        icon: paperless-ngx.png
+        widget:
+          type: paperlessngx
+          url: "http://paperless:8000"
+          key: "{{ vault_paperless_api_token }}"
+
+- Health:
+    - Gym Bro:
+        href: "https://gym-bro.{{ internal_subdomain }}.{{ domain }}"
+        description: Workout Tracker
+        icon: "https://gym-bro.{{ internal_subdomain }}.{{ domain }}/assets/icons/icon-192x192.png"
+
+    - daily:
+        href: "https://daily.{{ internal_subdomain }}.{{ domain }}"
+        description: Meals, Sleep & Body Tracker
+        icon: "https://daily.{{ internal_subdomain }}.{{ domain }}/icons/icon-192x192.png"
+
+- Security & Identity:
+    - Keycloak:
+        href: "https://auth.{{ domain }}"
+        description: Identity & Access Management
+        icon: keycloak.png
+
+    - Vaultwarden:
+        href: "https://bw.{{ internal_subdomain }}.{{ domain }}"
+        description: Password Manager
+        icon: vaultwarden.png
+
+    - HashiCorp Vault:
+        href: "https://vault.{{ internal_subdomain }}.{{ domain }}"
+        description: Secrets Management
+        icon: hashicorp-vault.png
+
+- Development:
+    - GitLab:
+        href: "https://gitlab.{{ internal_subdomain }}.{{ domain }}"
+        description: DevOps Platform
+        icon: gitlab.png
+        widget:
+          type: gitlab
+          url: "http://gitlab"
+          key: "{{ vault_gitlab_api_token }}"
+          user_id: "{{ gitlab_homepage_user_id }}"
+    
+    - Harbor Registry:
+        # The UI hostname, not registry.* — Harbor's session cookie is host-scoped
+        # and its OIDC callback always returns to external_url (harbor.*), so
+        # starting a login on registry.* loses the state and yields a 400.
+        href: "https://harbor.{{ internal_subdomain }}.{{ domain }}"
+        description: Container Image Registry
+        icon: harbor.png
+
+    - OpenChamber:
+        # Runs on the atlas dev-lab VM, not here; its own Traefik and Keycloak SSO.
+        href: "https://ai.{{ internal_subdomain }}.{{ domain }}"
+        description: AI coding workspace on atlas
+        icon: opencode.png
+
+- Monitoring:
+    - Grafana:
+        href: "https://monitoring.{{ internal_subdomain }}.{{ domain }}"
+        description: Metrics & Log Dashboards
+        icon: grafana.png
+        widget:
+          type: grafana
+          url: "https://monitoring.{{ internal_subdomain }}.{{ domain }}"
+          username: admin
+          password: "{{ vault_grafana_admin_password }}"
+
+- Network:
+    - Headscale:
+        href: "https://vpn.{{ domain }}"
+        description: VPN Coordination Server
+        icon: headscale.png
+
+    - Headplane:
+        href: "https://headscale.{{ internal_subdomain }}.{{ domain }}/admin"
+        description: Headscale Admin UI
+        icon: mdi-vpn
+
+    - Traefik:
+        href: "https://traefik.{{ internal_subdomain }}.{{ domain }}"
+        description: Reverse Proxy & Load Balancer
+        icon: traefik.png
+
+    - Pi-hole:
+        href: "http://{{ minipc_ip }}:8080/admin"
+        description: Network-wide Ad Blocker & DNS
+        icon: pi-hole.png
+        widget:
+          type: pihole
+          url: "http://{{ minipc_ip }}:8080"
+          version: 6
+          key: "{{ vault_pihole_webpassword }}"

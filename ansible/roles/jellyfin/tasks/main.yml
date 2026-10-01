@@ -1,0 +1,99 @@
+---
+# Ansible's file module creates missing parent directories with root's umask rather
+# than with the owner/mode requested for the leaf, so the intermediate dirs that group
+# libraries (anime/) are derived and listed explicitly instead of being left implicit.
+- name: Build the media directory list
+  ansible.builtin.set_fact:
+    _jellyfin_media_dirs: >-
+      {{ jellyfin_media_trees
+         | product(jellyfin_libraries + (jellyfin_libraries | map('dirname') | select | list))
+         | map('join', '/')
+         | map('regex_replace', '^', jellyfin_media_root ~ '/')
+         | unique | list }}
+
+- name: Create media root
+  ansible.builtin.file:
+    path: "{{ jellyfin_media_root }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0750'
+
+# Rendered to the media root rather than through compose_stack's `compose_templates`,
+# whose dest is relative to the service dir. It sits outside library/ on purpose so
+# Jellyfin never scans it.
+- name: Render the media naming guide
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../services/jellyfin/NAMING.md.j2"
+    dest: "{{ jellyfin_media_root }}/NAMING.md"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0640'
+
+- name: Deploy jellyfin compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: jellyfin
+    # Only library/ is bind-mounted ({{ jellyfin_media_root }}/library:/media:ro).
+    # incoming/ is created here but left outside the mount so the container cannot
+    # reach the staging tree at all.
+    compose_extra_dirs: "{{ _jellyfin_media_dirs }}"
+
+# Without realtime monitoring a library only changes at the scheduled scan, so a track
+# MeTube has just written sits invisible for up to an hour. Jellyfin sets this per
+# library at creation time and the Musik library was created without it, so rather than
+# document a checkbox, converge every library on it.
+- name: jellyfin | read the current library options
+  ansible.builtin.uri:
+    url: "{{ jellyfin_url }}/Library/VirtualFolders"
+    headers:
+      Authorization: 'MediaBrowser Token="{{ vault_jellyfin_api_key }}"'
+    # 401 is the expected answer during a first bootstrap, before the API key in Vault
+    # belongs to a Jellyfin that exists. There are no libraries to converge then either.
+    status_code: [200, 401]
+  register: _jellyfin_folders
+  changed_when: false
+  # uri has no check mode and would otherwise be skipped, leaving the task below without
+  # a status to branch on. This is a read-only GET, safe in a dry run.
+  check_mode: false
+  no_log: true
+
+- name: jellyfin | enable realtime monitoring on every library
+  ansible.builtin.uri:
+    url: "{{ jellyfin_url }}/Library/VirtualFolders/LibraryOptions"
+    method: POST
+    headers:
+      Authorization: 'MediaBrowser Token="{{ vault_jellyfin_api_key }}"'
+    body_format: json
+    # Post the library's existing options back with the one field changed; the endpoint
+    # replaces the whole object, so anything omitted here would be reset to its default.
+    body:
+      Id: "{{ item.ItemId }}"
+      LibraryOptions: "{{ item.LibraryOptions | combine({'EnableRealtimeMonitor': true}) }}"
+    status_code: [200, 204]
+  # uri never reports changed by itself. The loop only holds libraries whose flag is
+  # off, so reaching this task at all is the change — and the rescan below depends on it.
+  changed_when: true
+  loop: >-
+    {{ _jellyfin_folders.json | default([])
+       | rejectattr('LibraryOptions.EnableRealtimeMonitor') | list }}
+  loop_control:
+    label: "{{ item.Name }}"
+  when: _jellyfin_folders.status == 200
+  no_log: true
+  register: _jellyfin_realtime
+
+# LibraryMonitor only picks up a changed EnableRealtimeMonitor when the library is next
+# validated, so without this the setting sits inert until the scheduled scan — exactly
+# the delay it was turned on to remove. (It also skips watching an empty library folder,
+# so films/series stay unwatched until they hold something.)
+- name: jellyfin | rescan so the monitor starts watching
+  ansible.builtin.uri:
+    url: "{{ jellyfin_url }}/Library/Refresh"
+    method: POST
+    headers:
+      Authorization: 'MediaBrowser Token="{{ vault_jellyfin_api_key }}"'
+    status_code: [200, 204]
+  when: _jellyfin_realtime is changed
+  no_log: true

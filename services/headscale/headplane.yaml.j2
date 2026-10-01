@@ -1,0 +1,12 @@
+headscale:
+  url: "http://headscale:8080"
+  integration:
+    kind: docker
+
+server:
+  host: "0.0.0.0"
+  port: 3000
+  cookie_secret: "{{ vault_headplane_cookie_secret[:32] }}"
+
+api_key: "{{ vault_headplane_api_key }}"
+disable_api_key_login: false

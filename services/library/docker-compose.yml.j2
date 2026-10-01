@@ -1,0 +1,132 @@
+---
+services:
+
+  library-frontend:
+    image: "{{ library_registry }}/{{ library_harbor_project }}/frontend:{{ library_version }}"
+    container_name: library-frontend
+    restart: unless-stopped
+    environment:
+      # The browser talks to the API on the same origin; nginx inside this container
+      # proxies /api/ to the shim, so there is no CORS and no API hostname baked into
+      # the bundle.
+      API_URL: "/api/v1"
+      BACKEND_URL: "http://library-api:8000"
+      KEYCLOAK_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_REALM: "homelab"
+      KEYCLOAK_CLIENT_ID: "library-app"
+    depends_on:
+      - library-api
+    networks:
+      - proxy
+      - internal
+    healthcheck:
+      # 127.0.0.1, not localhost: the container resolves localhost to ::1 first and
+      # nginx listens on IPv4 only, so the check would fail and Traefik drops
+      # unhealthy containers from the router entirely (404 rather than 502).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.library.rule=Host(`library.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.library.entrypoints=websecure"
+      - "traefik.http.routers.library.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.library.service=library"
+      - "traefik.http.services.library.loadbalancer.server.port=80"
+      - "traefik.docker.network=proxy"
+
+  library-api:
+    image: "{{ library_registry }}/{{ library_harbor_project }}/backend:{{ library_version }}"
+    container_name: library-api
+    restart: unless-stopped
+    environment:
+      # Same host for both: tokens are issued to the browser under the public name,
+      # and the API resolves it over the LAN through Pi-hole.
+      KEYCLOAK_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_PUBLIC_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_REALM: "homelab"
+      KEYCLOAK_CLIENT_ID: "library-app"
+      # The reader is single-owner: a valid token from any other realm account is a 403.
+      OWNER_SUB: "{{ library_owner_sub }}"
+      MINIFLUX_URL: "http://library-miniflux:8080"
+      MINIFLUX_USERNAME: "{{ library_miniflux_username }}"
+      MINIFLUX_PASSWORD: "{{ vault_library_miniflux_admin_password }}"
+      CORS_ORIGINS: '["https://library.{{ internal_subdomain }}.{{ domain }}"]'
+    depends_on:
+      library-miniflux:
+        condition: service_healthy
+    healthcheck:
+      # The image has neither curl nor wget.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 60s
+      start_interval: 5s
+    networks:
+      # proxy is needed for egress: the shim verifies tokens against Keycloak's JWKS
+      # endpoint, and `internal` has no route out. It publishes no Traefik router.
+      - proxy
+      - internal
+
+  library-miniflux:
+    image: "miniflux/miniflux:{{ miniflux_version }}"
+    container_name: library-miniflux
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: "postgres://library:{{ vault_library_db_password | urlencode | replace('/', '%2F') }}@library-db/library?sslmode=disable"
+      RUN_MIGRATIONS: "1"
+      CREATE_ADMIN: "1"
+      ADMIN_USERNAME: "{{ library_miniflux_username }}"
+      ADMIN_PASSWORD: "{{ vault_library_miniflux_admin_password }}"
+      POLLING_FREQUENCY: "{{ library_polling_frequency }}"
+      # Prometheus scrapes /metrics over the shared proxy network.
+      METRICS_COLLECTOR: "1"
+      METRICS_ALLOWED_NETWORKS: "{{ library_metrics_allowed_networks }}"
+    depends_on:
+      library-db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/usr/bin/miniflux", "-healthcheck", "auto"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    networks:
+      # No traefik.enable label anywhere on this service: the engine is reachable only
+      # from library-api. It sits on proxy purely for egress — `internal` has none, and
+      # a feed reader that cannot reach the open internet polls nothing.
+      - proxy
+      - internal
+
+  library-db:
+    image: "postgres:{{ postgres_version }}"
+    container_name: library-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: library
+      POSTGRES_USER: library
+      POSTGRES_PASSWORD: "{{ vault_library_db_password }}"
+    volumes:
+      - library_db:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U library -d library"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  proxy:
+    external: true
+  internal:
+    name: library_internal
+    internal: true
+
+volumes:
+  library_db:
+    name: library_db

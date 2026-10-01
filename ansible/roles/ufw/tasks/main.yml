@@ -1,0 +1,72 @@
+---
+- name: Install UFW
+  apt:
+    name: ufw
+    state: present
+    update_cache: false
+
+# ── Default policies ───────────────────────────────────────────────────────────
+- name: Set UFW default incoming policy to deny
+  ufw:
+    direction: incoming
+    policy: deny
+
+- name: Set UFW default outgoing policy to allow
+  ufw:
+    direction: outgoing
+    policy: allow
+
+# ── Host-level rules ───────────────────────────────────────────────────────────
+- name: Allow SSH
+  ufw:
+    rule: allow
+    port: '1461'
+    proto: tcp
+
+- name: Allow HTTP (Traefik)
+  ufw:
+    rule: allow
+    port: '80'
+    proto: tcp
+
+- name: Allow HTTPS (Traefik)
+  ufw:
+    rule: allow
+    port: '443'
+    proto: tcp
+
+- name: Allow DNS TCP (Pi-hole)
+  ufw:
+    rule: allow
+    port: '53'
+    proto: tcp
+
+- name: Allow DNS UDP (Pi-hole)
+  ufw:
+    rule: allow
+    port: '53'
+    proto: udp
+
+- name: Allow GitLab SSH
+  ufw:
+    rule: allow
+    port: '2222'
+    proto: tcp
+
+- name: Allow Pi-hole admin UI
+  ufw:
+    rule: allow
+    port: '8080'
+    proto: tcp
+
+- name: Allow MQTT over TLS (Traefik → Mosquitto)
+  ufw:
+    rule: allow
+    port: '8883'
+    proto: tcp
+
+# ── Enable ─────────────────────────────────────────────────────────────────────
+- name: Enable UFW
+  ufw:
+    state: enabled
+    logging: 'on'

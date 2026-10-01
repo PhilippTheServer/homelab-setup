@@ -1,0 +1,23 @@
+---
+# Where the application source lives on the control machine. The default assumes the
+# gym-bro repo is checked out next to this one:
+#   ~/code/homelab
+#   ~/code/gym-bro
+gym_bro_source_dir: "{{ playbook_dir }}/../../gym-bro"
+
+# Harbor coordinates. `registry.` is the CLI/pull endpoint; `harbor.` is the UI.
+gym_bro_registry: "registry.{{ internal_subdomain }}.{{ domain }}"
+gym_bro_harbor_project: "gym-bro"
+gym_bro_image_backend: "{{ gym_bro_registry }}/{{ gym_bro_harbor_project }}/backend"
+gym_bro_image_frontend: "{{ gym_bro_registry }}/{{ gym_bro_harbor_project }}/frontend"
+
+# Harbor's own API, reachable on the host without going through Traefik.
+gym_bro_harbor_api: "https://harbor.{{ internal_subdomain }}.{{ domain }}/api/v2.0"
+
+# Where the source tarball is unpacked and images are built on the Mini PC.
+gym_bro_build_dir: "{{ homelab_base_dir }}/build/gym-bro"
+
+# Images are built only when the configured version is absent from Harbor. Set this to
+# rebuild and overwrite an existing tag (e.g. after fixing something without a version
+# bump): ansible-playbook ansible/site.yml --tags gym-bro -e gym_bro_force_build=true
+gym_bro_force_build: false

@@ -1,0 +1,48 @@
+---
+- name: daily2 | build and publish the images
+  ansible.builtin.include_role:
+    name: harbor_image
+  vars:
+    harbor_image_name: daily2
+    harbor_image_source_repo: github.com/PhilippTheServer/daily
+    harbor_image_source_dir: "{{ daily2_source_dir }}"
+    harbor_image_version_file: backend/pyproject.toml
+    harbor_image_registry: "{{ daily2_registry }}"
+    harbor_image_project: "{{ daily2_harbor_project }}"
+    harbor_image_components: "{{ daily2_components }}"
+    harbor_image_version: "{{ daily2_version }}"
+    harbor_image_build_dir: "{{ daily2_build_dir }}"
+    harbor_image_force_build: "{{ daily2_force_build }}"
+
+# daily v1 served the daily.* hosts until daily2 took them over. Its stack has to be down
+# before daily2 claims the same routes. The daily_db volume is kept on purpose: it is the
+# last copy of v1's data.
+- name: daily2 | find the retired daily v1 stack
+  ansible.builtin.stat:
+    path: "{{ homelab_base_dir }}/services/daily/docker-compose.yml"
+  register: _daily_v1
+
+- name: daily2 | take down the retired daily v1 stack, keeping its volume
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_base_dir }}/services/daily"
+    state: absent
+    remove_volumes: false
+  become_user: "{{ deploy_user }}"
+  when: _daily_v1.stat.exists
+
+- name: daily2 | remove the retired daily v1 config and build tree
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: absent
+  loop:
+    - "{{ homelab_base_dir }}/services/daily"
+    - "{{ homelab_base_dir }}/build/daily"
+
+- name: daily2 | deploy the compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: daily2
+    # A failed migration crash-loops the backend; without waiting the play would
+    # still report success.
+    compose_wait: true

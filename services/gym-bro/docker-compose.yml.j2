@@ -1,0 +1,106 @@
+---
+services:
+
+  gym-bro-frontend:
+    image: "{{ gym_bro_image_frontend }}:{{ gym_bro_version }}"
+    container_name: gym-bro-frontend
+    restart: unless-stopped
+    environment:
+      # The browser talks to the API on the same origin; nginx inside this container
+      # proxies /api/ to the backend, so there is no CORS and no API hostname baked
+      # into the Angular bundle.
+      API_URL: "/api/v1"
+      BACKEND_URL: "http://gym-bro-backend:8000"
+      KEYCLOAK_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_REALM: "homelab"
+      KEYCLOAK_CLIENT_ID: "gym-bro"
+    depends_on:
+      - gym-bro-backend
+    networks:
+      - proxy
+      - internal
+    healthcheck:
+      # 127.0.0.1, not localhost: the container resolves localhost to ::1 first and
+      # nginx listens on IPv4 only, so the check would fail and Traefik drops
+      # unhealthy containers from the router entirely (404 rather than 502).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.gym-bro.rule=Host(`gym-bro.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.gym-bro.entrypoints=websecure"
+      - "traefik.http.routers.gym-bro.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.gym-bro.service=gym-bro"
+      - "traefik.http.services.gym-bro.loadbalancer.server.port=80"
+      - "traefik.docker.network=proxy"
+
+  gym-bro-backend:
+    image: "{{ gym_bro_image_backend }}:{{ gym_bro_version }}"
+    container_name: gym-bro-backend
+    restart: unless-stopped
+    environment:
+      # urlencode leaves '/' alone (it treats the value as a path), which would cut the
+      # URL short for a base64 password — escape it explicitly.
+      DATABASE_URL: "postgresql+asyncpg://gymbro:{{ vault_gym_bro_db_password | urlencode | replace('/', '%2F') }}@gym-bro-db/gymbro"
+      # Same host for both: tokens are issued to the browser under the public name,
+      # and the API resolves it over the LAN through Pi-hole.
+      KEYCLOAK_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_PUBLIC_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_REALM: "homelab"
+      KEYCLOAK_CLIENT_ID: "gym-bro"
+      CORS_ORIGINS: '["https://gym-bro.{{ internal_subdomain }}.{{ domain }}"]'
+      RUN_SEED: "true"
+      # The daily-gymbro-sync Keycloak client, the only service account allowed to call
+      # the /export route (a client-credentials grant, checked against this client ID).
+      EXPORT_CLIENT_ID: "daily-gymbro-sync"
+    depends_on:
+      gym-bro-db:
+        condition: service_healthy
+    healthcheck:
+      # The image has neither curl nor wget. start_period covers migrations and the
+      # catalogue seed, which run in the entrypoint before uvicorn listens.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+      start_interval: 5s
+    # `proxy` is not for routing here — the backend carries no Traefik labels. It is
+    # attached because `internal` has no egress, and the API must reach Keycloak's
+    # JWKS endpoint to verify tokens.
+    networks:
+      - proxy
+      - internal
+
+  gym-bro-db:
+    image: "postgres:{{ postgres_version }}"
+    container_name: gym-bro-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: gymbro
+      POSTGRES_USER: gymbro
+      POSTGRES_PASSWORD: "{{ vault_gym_bro_db_password }}"
+    volumes:
+      - gym_bro_db:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gymbro -d gymbro"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  proxy:
+    external: true
+  internal:
+    name: gym_bro_internal
+    internal: true
+
+volumes:
+  gym_bro_db:
+    name: gym_bro_db

@@ -1,0 +1,33 @@
+---
+- Homelab:
+    - Homelab Git Repo:
+        - href: "https://gitlab.{{ internal_subdomain }}.{{ domain }}"
+          icon: gitlab.png
+    - Keycloak Admin:
+        - href: "https://auth.{{ domain }}/admin/master/console/"
+          icon: keycloak.png
+    - Vault UI:
+        - href: "https://vault.{{ internal_subdomain }}.{{ domain }}/ui"
+          icon: hashicorp-vault.png
+
+- DNS & Network:
+    - Pi-hole Admin:
+        - href: "http://{{ minipc_ip }}:8080/admin"
+          icon: pi-hole.png
+    - Headplane:
+        - href: "https://headscale.{{ internal_subdomain }}.{{ domain }}/admin"
+          icon: mdi-vpn
+    - Traefik Dashboard:
+        - href: "https://traefik.{{ internal_subdomain }}.{{ domain }}"
+          icon: traefik.png
+
+- External:
+    - Namecheap:
+        - href: "https://www.namecheap.com/myaccount/login/"
+          icon: mdi-domain
+    - GitHub:
+        - href: "https://github.com"
+          icon: github.png
+    - Docker Hub:
+        - href: "https://hub.docker.com"
+          icon: docker.png

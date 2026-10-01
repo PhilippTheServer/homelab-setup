@@ -1,0 +1,33 @@
+---
+services:
+
+  homepage:
+    image: ghcr.io/gethomepage/homepage:{{ homepage_version }}
+    container_name: homepage
+    restart: unless-stopped
+    environment:
+      HOMEPAGE_AUTH_PROVIDER: oidc
+      NEXTAUTH_URL: "https://dash.{{ internal_subdomain }}.{{ domain }}"
+      NEXTAUTH_SECRET: "{{ vault_homepage_nextauth_secret }}"
+      AUTH_OIDC_ISSUER: "https://auth.{{ domain }}/realms/homelab"
+      AUTH_OIDC_CLIENT_ID: homepage
+      AUTH_OIDC_CLIENT_SECRET: "{{ vault_homepage_oidc_secret }}"
+      AUTH_OIDC_NAME: Homelab SSO
+      HOMEPAGE_ALLOWED_HOSTS: "dash.{{ internal_subdomain }}.{{ domain }}"
+    volumes:
+      - {{ homelab_base_dir }}/services/homepage/config:/app/config
+      - {{ homelab_base_dir }}/services/homepage/images:/app/public/images
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.homepage.rule=Host(`dash.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.homepage.entrypoints=websecure"
+      - "traefik.http.routers.homepage.tls.certresolver=letsencrypt"
+      - "traefik.http.services.homepage.loadbalancer.server.port=3000"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true

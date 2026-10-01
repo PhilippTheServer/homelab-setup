@@ -1,0 +1,41 @@
+---
+services:
+
+  mosquitto:
+    image: eclipse-mosquitto:{{ mosquitto_version }}
+    container_name: mosquitto
+    restart: unless-stopped
+    # Run as the image's own mosquitto uid/gid so the entrypoint skips its
+    # root-only `chown -R /mosquitto` (which errors on the read-only config
+    # mounts). The password file is pre-rendered owned 1883:1883 mode 0700 by
+    # the mqtt role, and the named volumes inherit 1883 ownership from the image.
+    user: "1883:1883"
+    volumes:
+      - {{ homelab_base_dir }}/services/mqtt/config/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - {{ homelab_base_dir }}/services/mqtt/config/passwd:/mosquitto/config/passwd:ro
+      - mosquitto_data:/mosquitto/data
+      - mosquitto_log:/mosquitto/log
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      # Raw MQTT is a TCP protocol — Traefik terminates TLS on the `mqtt` entrypoint
+      # (:8883) using the shared *.home wildcard cert, then forwards the decrypted
+      # stream to mosquitto's plain 1883 listener. Auth is enforced by mosquitto.
+      - "traefik.tcp.routers.mqtt.rule=HostSNI(`mqtt.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.tcp.routers.mqtt.entrypoints=mqtt"
+      - "traefik.tcp.routers.mqtt.tls=true"
+      - "traefik.tcp.routers.mqtt.tls.certresolver=letsencrypt"
+      - "traefik.tcp.routers.mqtt.service=mqtt"
+      - "traefik.tcp.services.mqtt.loadbalancer.server.port=1883"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  mosquitto_data:
+    name: mosquitto_data
+  mosquitto_log:
+    name: mosquitto_log

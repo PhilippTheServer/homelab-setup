@@ -1,0 +1,24 @@
+networks:
+  proxy:
+    external: true
+
+services:
+  proxy:
+    networks:
+      - harbor
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.harbor.rule=Host(`harbor.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.harbor.entrypoints=websecure"
+      - "traefik.http.routers.harbor.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.harbor.service=harbor"
+      - "traefik.http.routers.registry.rule=Host(`registry.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.registry.entrypoints=websecure"
+      - "traefik.http.routers.registry.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.registry.service=harbor"
+      # Traefik reaches the container over the `proxy` network, so this is the port
+      # nginx listens on *inside* the container — always 8080 — not the host port
+      # published by harbor.yml's `http.port`. Pointing it at the latter produced a 502.
+      - "traefik.http.services.harbor.loadbalancer.server.port=8080"
+      - "traefik.docker.network=proxy"

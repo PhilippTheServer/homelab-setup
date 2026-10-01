@@ -1,0 +1,16 @@
+# Managed by Ansible — services/mqtt/config/mosquitto.conf.j2
+# Plain listener, only reachable through Traefik on the internal `proxy` network.
+# TLS is terminated by Traefik (mqtt entrypoint :8883); this port is never
+# published to the host.
+listener 1883
+
+# Authentication — shared account, anonymous access disabled.
+allow_anonymous false
+password_file /mosquitto/config/passwd
+
+# Persistence (named volume).
+persistence true
+persistence_location /mosquitto/data/
+
+# Log to stdout so logs flow into the Docker/Loki pipeline.
+log_dest stdout

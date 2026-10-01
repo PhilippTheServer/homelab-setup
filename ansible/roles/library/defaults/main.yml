@@ -1,0 +1,35 @@
+---
+# Where the application source lives on the control machine. The default assumes the
+# library repo is checked out next to this one:
+#   ~/code/homelab
+#   ~/code/library
+library_source_dir: "{{ playbook_dir }}/../../library"
+
+# Harbor coordinates. `registry.` is the CLI/pull endpoint; `harbor.` is the UI.
+library_registry: "registry.{{ internal_subdomain }}.{{ domain }}"
+library_harbor_project: "library"
+
+# Components built and published from a `library-<component>` source directory, as
+# `{{ library_registry }}/{{ library_harbor_project }}/<component>`.
+library_components:
+  - backend
+  - frontend
+
+# Harbor's own API, reachable on the host without going through Traefik.
+library_harbor_api: "https://harbor.{{ internal_subdomain }}.{{ domain }}/api/v2.0"
+
+# Where the source tarball is unpacked and images are built on the Mini PC.
+library_build_dir: "{{ homelab_base_dir }}/build/library"
+
+# Images are built only when the configured version is absent from Harbor. Set this to
+# rebuild and overwrite an existing tag (e.g. after fixing something without a version
+# bump): ansible-playbook ansible/site.yml --tags library -e library_force_build=true
+library_force_build: false
+
+# How often Miniflux polls feeds, in minutes. The engine spreads the work across the
+# interval rather than hammering every feed at once.
+library_polling_frequency: 30
+
+# Miniflux's own account. The API shim authenticates with these; nobody signs in to the
+# engine directly, because it has no route.
+library_miniflux_username: library
