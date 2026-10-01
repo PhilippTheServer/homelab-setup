@@ -1,0 +1,323 @@
+---
+# Who may sign in to what (see keycloak_open_clients in defaults/main.yml).
+#
+# Runs after the client sync in main.yml. When the realm template changes, that sync PUTs
+# every client from the template, which drops an open client's flow override; the client
+# then falls back to the gated default (admin-only, fails closed) until the tasks below
+# restore the override later in the same run.
+
+- name: Get admin token (access)
+  uri:
+    url: "https://auth.{{ domain }}/realms/master/protocol/openid-connect/token"
+    method: POST
+    body_format: form-urlencoded
+    body:
+      client_id: admin-cli
+      username: "{{ vault_keycloak_admin_user }}"
+      password: "{{ vault_keycloak_admin_password }}"
+      grant_type: password
+  register: _kc_token_access
+  check_mode: false
+  changed_when: false
+  no_log: true
+
+- name: Get authentication flows
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab/authentication/flows"
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+  register: _kc_flows
+  check_mode: false
+
+- name: Note the gated and the stock browser flow
+  set_fact:
+    _gated_flow_exists: "{{ keycloak_gated_flow in (_kc_flows.json | map(attribute='alias') | list) }}"
+    _stock_browser_flow_id: "{{ (_kc_flows.json | selectattr('alias', 'equalto', 'browser') | first).id }}"
+
+- name: Report that the gated flow will be built
+  debug:
+    msg: "{{ keycloak_gated_flow }} does not exist yet; it will be built from keycloak_gated_flow_nodes"
+  when: not _gated_flow_exists
+
+# Each step reads back what the previous one created, so in check mode, where nothing is
+# created, the report above stands in for the whole build.
+- name: Build the gated browser flow
+  when: not _gated_flow_exists and not ansible_check_mode
+  block:
+    - name: Create the gated flow
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/authentication/flows"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+        body:
+          alias: "{{ keycloak_gated_flow }}"
+          description: "Browser sign-in, then Access denied without the realm role {{ keycloak_admin_role }}"
+          providerId: basic-flow
+          topLevel: true
+          builtIn: false
+        body_format: json
+        status_code: 201
+      changed_when: true
+
+    - name: Add the gated flow's steps
+      uri:
+        url: >-
+          https://auth.{{ domain }}/admin/realms/homelab/authentication/flows/{{ item.parent | urlencode }}/executions/{{ 'flow' if item.subflow is defined else 'execution' }}
+        method: POST
+        headers:
+          Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+        body: >-
+          {{ {'alias': item.subflow, 'type': 'basic-flow', 'description': ''}
+             if item.subflow is defined else {'provider': item.provider} }}
+        body_format: json
+        status_code: 201
+      loop: "{{ keycloak_gated_flow_nodes }}"
+      loop_control:
+        label: "{{ item.subflow | default(item.provider) }}"
+      changed_when: true
+
+    - name: Read the new flow's steps
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/authentication/flows/{{ keycloak_gated_flow | urlencode }}/executions"
+        headers:
+          Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+      register: _gated_new_steps
+
+    # New steps start DISABLED. The GET lists them depth-first, the order they were added
+    # in, so they pair up with keycloak_gated_flow_nodes; the assert guards that pairing.
+    - name: Check the new steps line up with the definition
+      assert:
+        that:
+          - _gated_new_steps.json | length == keycloak_gated_flow_nodes | length
+          - >-
+            (item.0.displayName == item.1.subflow) if item.1.subflow is defined
+            else (item.0.providerId == item.1.provider)
+        quiet: true
+      loop: "{{ _gated_new_steps.json | zip(keycloak_gated_flow_nodes) | list }}"
+      loop_control:
+        label: "{{ item.1.subflow | default(item.1.provider) }}"
+
+    - name: Set each step's requirement
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/authentication/flows/{{ keycloak_gated_flow | urlencode }}/executions"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+        body: "{{ item.0 | combine({'requirement': item.1.requirement}) }}"
+        body_format: json
+        status_code: [202, 204]
+      loop: "{{ _gated_new_steps.json | zip(keycloak_gated_flow_nodes) | list }}"
+      loop_control:
+        label: "{{ item.1.subflow | default(item.1.provider) }}: {{ item.1.requirement }}"
+      changed_when: true
+
+    - name: Configure the gate's role condition
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/authentication/executions/{{ item.0.id }}/config"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+        body:
+          alias: "{{ keycloak_gated_flow }} {{ item.1.provider }}"
+          config: "{{ item.1.config }}"
+        body_format: json
+        status_code: 201
+      loop: "{{ _gated_new_steps.json | zip(keycloak_gated_flow_nodes) | selectattr('1.config', 'defined') | list }}"
+      loop_control:
+        label: "{{ item.1.provider }}"
+      changed_when: true
+
+# Every run, not just after a build: someone editing the flow in the UI (or a missing
+# step) must fail the play instead of quietly opening the gate. In check mode a flow
+# that does not exist yet has nothing to check.
+- name: Verify the gated flow
+  when: _gated_flow_exists or not ansible_check_mode
+  block:
+    - name: Read the gated flow's steps
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/authentication/flows/{{ keycloak_gated_flow | urlencode }}/executions"
+        headers:
+          Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+      register: _gated_steps
+      check_mode: false
+
+    - name: Read the gate's role condition
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/authentication/config/{{ (_gated_steps.json | selectattr('providerId', 'defined') | selectattr('providerId', 'equalto', 'conditional-user-role') | first).authenticationConfig }}"
+        headers:
+          Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+      register: _gate_condition
+      check_mode: false
+
+    - name: Assert the gated flow matches its definition
+      assert:
+        that:
+          - _gated_steps.json | length == keycloak_gated_flow_nodes | length
+          - >-
+            (item.0.displayName == item.1.subflow) if item.1.subflow is defined
+            else (item.0.providerId == item.1.provider)
+          - item.0.requirement == item.1.requirement
+        fail_msg: "{{ keycloak_gated_flow }} drifted from keycloak_gated_flow_nodes at {{ item.1.subflow | default(item.1.provider) }}"
+        quiet: true
+      loop: "{{ _gated_steps.json | zip(keycloak_gated_flow_nodes) | list }}"
+      loop_control:
+        label: "{{ item.1.subflow | default(item.1.provider) }}"
+
+    - name: Assert the gate denies users without the admin role
+      assert:
+        that:
+          - _gate_condition.json.config.condUserRole == keycloak_admin_role
+          - _gate_condition.json.config.negate | bool
+        quiet: true
+
+- name: Get the realm's default browser flow
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab"
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+  register: _realm_access
+  check_mode: false
+
+- name: Report a default browser flow change
+  debug:
+    msg: "browserFlow: {{ _realm_access.json.browserFlow }} -> {{ keycloak_gated_flow }}"
+  when: _realm_access.json.browserFlow != keycloak_gated_flow
+
+- name: Make the gated flow the realm's default browser flow
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+    body:
+      browserFlow: "{{ keycloak_gated_flow }}"
+    body_format: json
+    status_code: 204
+  when: _realm_access.json.browserFlow != keycloak_gated_flow
+  changed_when: true
+
+- name: Get clients (access)
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab/clients?max=200"
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+  register: _access_clients
+  check_mode: false
+  no_log: true
+
+- name: Work out which open clients still use the gated flow
+  set_fact:
+    _open_clients_to_bind: >-
+      {{ _access_clients.json
+         | selectattr('clientId', 'in', keycloak_open_clients)
+         | rejectattr('authenticationFlowBindingOverrides.browser', 'defined')
+         | list
+         + _access_clients.json
+         | selectattr('clientId', 'in', keycloak_open_clients)
+         | selectattr('authenticationFlowBindingOverrides.browser', 'defined')
+         | rejectattr('authenticationFlowBindingOverrides.browser', 'equalto', _stock_browser_flow_id)
+         | list }}
+  no_log: true
+
+- name: Report open clients being bound to the stock browser flow
+  debug:
+    msg: "{{ _open_clients_to_bind | map(attribute='clientId') | list }}"
+  when: _open_clients_to_bind | length > 0
+
+- name: Bind open clients to the stock browser flow
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab/clients/{{ item.id }}"
+    method: PUT
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+    body: >-
+      {{ item | combine({'authenticationFlowBindingOverrides':
+                         (item.authenticationFlowBindingOverrides | default({}))
+                         | combine({'browser': _stock_browser_flow_id})}) }}
+    body_format: json
+    status_code: 204
+  loop: "{{ _open_clients_to_bind }}"
+  loop_control:
+    label: "{{ item.clientId }}"
+  changed_when: true
+  no_log: true
+
+# An override to any other flow on a client outside keycloak_open_clients would let it
+# skip the gate, e.g. one set in the UI. Fail loudly rather than quietly remove it.
+- name: Assert no other client bypasses the gated flow
+  assert:
+    that:
+      - bypassing | length == 0
+    fail_msg: "Clients with their own browser flow, outside keycloak_open_clients: {{ bypassing }}"
+    quiet: true
+  vars:
+    bypassing: >-
+      {{ _access_clients.json
+         | rejectattr('clientId', 'in', keycloak_open_clients)
+         | selectattr('authenticationFlowBindingOverrides.browser', 'defined')
+         | map(attribute='clientId') | list }}
+
+# ── Accounts (keycloak_users) ─────────────────────────────────────────────────
+
+- name: Look up managed accounts
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab/users?exact=true&username={{ item.username | urlencode }}"
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+  register: _kc_user_lookup
+  loop: "{{ keycloak_users }}"
+  loop_control:
+    label: "{{ item.username }}"
+  check_mode: false
+
+- name: Report accounts that will be created
+  debug:
+    msg: "{{ _kc_user_lookup.results | selectattr('json', 'equalto', []) | map(attribute='item.username') | list }}"
+  when: _kc_user_lookup.results | selectattr('json', 'equalto', []) | list | length > 0
+
+- name: Create missing accounts with a one-time password
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab/users"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+    body:
+      username: "{{ item.item.username }}"
+      firstName: "{{ item.item.firstName }}"
+      enabled: true
+      credentials:
+        - type: password
+          value: "{{ item.item.initial_password }}"
+          temporary: true
+    body_format: json
+    status_code: 201
+  loop: "{{ _kc_user_lookup.results | selectattr('json', 'equalto', []) | list }}"
+  loop_control:
+    label: "{{ item.item.username }}"
+  changed_when: true
+  no_log: true
+
+- name: Look up the realm roles of managed accounts
+  uri:
+    url: "https://auth.{{ domain }}/admin/realms/homelab/users/{{ item.json[0].id }}/role-mappings/realm/composite"
+    headers:
+      Authorization: "Bearer {{ _kc_token_access.json.access_token }}"
+  register: _kc_user_roles
+  loop: "{{ _kc_user_lookup.results | rejectattr('json', 'equalto', []) | list }}"
+  loop_control:
+    label: "{{ item.item.username }}"
+  check_mode: false
+
+- name: Assert managed accounts hold the admin role only where intended
+  assert:
+    that:
+      - (keycloak_admin_role in (item.json | map(attribute='name'))) == (item.item.item.admin | default(false))
+    fail_msg: >-
+      {{ item.item.item.username }} {{ 'lacks' if item.item.item.admin | default(false) else 'holds' }}
+      the realm role {{ keycloak_admin_role }}, which decides whether every client or only
+      keycloak_open_clients are open to it. Fix it in the admin console or keycloak_users.
+    quiet: true
+  loop: "{{ _kc_user_roles.results }}"
+  loop_control:
+    label: "{{ item.item.item.username }}"

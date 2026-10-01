@@ -1,0 +1,16 @@
+---
+# Members of group:admins in the tailnet policy (services/headscale/acl.hujson.j2): full
+# access to every node and the home LAN. Everyone else can reach only gym-bro and DNS on
+# the Mini PC. Entries are OIDC provider identifiers plus "@"; `headscale users list -o
+# json` shows them as provider_id.
+headscale_admins:
+  - "https://auth.{{ domain }}/realms/homelab/00000000-0000-4000-8000-000000000001@"  # philipp
+
+# Members of group:exit-node: may send their internet traffic out through the Mini PC's
+# exit node (autogroup:internet), on top of what every member may reach. Admins already
+# may. vpn-check-exit is the local user scripts/check-vpn-acl.sh creates to prove the grant
+# works; it exists only while the check runs, and Keycloak can't create a user of that name
+# (registration is off).
+headscale_exit_node_users:
+  - "https://auth.{{ domain }}/realms/homelab/00000000-0000-4000-8000-000000000003@"  # carol
+  - "vpn-check-exit@"

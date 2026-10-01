@@ -1,0 +1,36 @@
+---
+# Local DNS records reach Pi-hole through FTLCONF_dns_hosts in the compose template, so a
+# changed list recreates the container like any other template change.
+- name: Deploy pihole compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: pihole
+    # The record check below needs Pi-hole answering again after a recreate.
+    compose_wait: true
+
+# Pi-hole v6 reads custom.list only during the v5 migration; a leftover one looks like
+# live config but is ignored.
+- name: Remove the custom.list Pi-hole no longer reads
+  ansible.builtin.file:
+    path: "{{ homelab_base_dir }}/services/pihole/etc-pihole/custom.list"
+    state: absent
+
+# Writing a record is not proof Pi-hole serves it, so ask Pi-hole for every one.
+- name: Check Pi-hole answers every local DNS record with the Mini PC
+  ansible.builtin.command:
+    cmd: "dig +short @{{ minipc_ip }} {{ item }} A"
+  register: _pihole_dns_answer
+  changed_when: false
+  failed_when: _pihole_dns_answer.stdout_lines != [minipc_ip]
+  loop: "{{ pihole_dns_hosts }}"
+  when: not ansible_check_mode
+
+- name: Check Pi-hole answers every non-Mini-PC record with its own address
+  ansible.builtin.command:
+    cmd: "dig +short @{{ minipc_ip }} {{ item.host }} A"
+  register: _pihole_dns_record_answer
+  changed_when: false
+  failed_when: _pihole_dns_record_answer.stdout_lines != [item.ip]
+  loop: "{{ pihole_dns_records }}"
+  when: not ansible_check_mode

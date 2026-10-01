@@ -1,0 +1,35 @@
+---
+services:
+
+  jellyfin:
+    image: jellyfin/jellyfin:{{ jellyfin_version }}
+    container_name: jellyfin
+    restart: unless-stopped
+    environment:
+      JELLYFIN_PublishedServerUrl: "https://media.{{ internal_subdomain }}.{{ domain }}"
+    volumes:
+      - jellyfin_config:/config
+      - jellyfin_cache:/cache
+      # Only the library tree — incoming/ (staging) stays outside the mount so the
+      # scanner cannot reach half-transferred or unnamed files.
+      - "{{ jellyfin_media_root }}/library:/media:ro"
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.jellyfin.rule=Host(`media.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.jellyfin.entrypoints=websecure"
+      - "traefik.http.routers.jellyfin.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.jellyfin.service=jellyfin"
+      - "traefik.http.services.jellyfin.loadbalancer.server.port=8096"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true
+
+volumes:
+  jellyfin_config:
+    name: jellyfin_config
+  jellyfin_cache:
+    name: jellyfin_cache

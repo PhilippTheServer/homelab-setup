@@ -1,0 +1,8 @@
+---
+# `restart hcvault` was removed when this role moved to the compose_stack pattern;
+# compose convergence + compose_restart_services handle Vault restarts now.
+- name: restart sshd
+  service:
+    name: sshd
+    state: restarted
+  become: true

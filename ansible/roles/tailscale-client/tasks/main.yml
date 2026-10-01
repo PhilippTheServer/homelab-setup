@@ -1,0 +1,41 @@
+---
+- name: Check if tailscale is already installed
+  ansible.builtin.command: which tailscale
+  register: tailscale_installed
+  changed_when: false
+  failed_when: false
+
+- name: Install tailscale via official install script
+  ansible.builtin.shell:
+    cmd: curl -fsSL https://tailscale.com/install.sh | sh
+  when: tailscale_installed.rc != 0
+
+- name: Enable and start tailscaled
+  ansible.builtin.systemd:
+    name: tailscaled
+    enabled: true
+    state: started
+
+# Docker turns IPv4 forwarding on as well, but the exit node and the subnet route must not
+# depend on Docker running.
+- name: Enable IPv4 forwarding for the subnet route and exit node
+  ansible.builtin.copy:
+    dest: /etc/sysctl.d/99-tailscale.conf
+    content: "net.ipv4.ip_forward = 1\n"
+    mode: "0644"
+  register: tailscale_sysctl
+
+- name: Apply IPv4 forwarding
+  ansible.builtin.command: sysctl -p /etc/sysctl.d/99-tailscale.conf
+  when: tailscale_sysctl.changed
+
+- name: Read tailscale prefs
+  ansible.builtin.command: tailscale debug prefs
+  register: tailscale_prefs
+  changed_when: false
+  check_mode: false
+
+# Keeps the advertised LAN route; headscale approves the exit node through autoApprovers.
+- name: Advertise the Mini PC as exit node
+  ansible.builtin.command: tailscale set --advertise-exit-node
+  when: "'0.0.0.0/0' not in (tailscale_prefs.stdout | from_json).AdvertiseRoutes | default([], true)"

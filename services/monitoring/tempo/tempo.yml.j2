@@ -1,0 +1,54 @@
+stream_over_http_enabled: true
+
+server:
+  http_listen_port: 3200
+  log_level: warn
+
+distributor:
+  receivers:
+    otlp:
+      protocols:
+        grpc:
+          endpoint: 0.0.0.0:4317
+        http:
+          endpoint: 0.0.0.0:4318
+
+# v3 renamed the ingester to live_store and rejects a top-level `ingester:` block.
+# Its own default is 30s, so the 5m block duration has to be carried over explicitly.
+live_store:
+  max_block_duration: 5m
+
+storage:
+  trace:
+    backend: local
+    local:
+      path: /var/tempo/traces
+    wal:
+      path: /var/tempo/wal
+    # v3 writes vParquet5 by default and 2.x cannot read those blocks, so the
+    # upgrade would be one-way at the data level as well as the binary level.
+    # Staying on vParquet4 keeps a rollback possible; drop this once v3 has run
+    # for a while without trouble.
+    block:
+      version: vParquet4
+
+metrics_generator:
+  registry:
+    external_labels:
+      source: tempo
+      cluster: homelab
+  storage:
+    path: /var/tempo/generator/wal
+    remote_write:
+      - url: http://prometheus:9090/api/v1/write
+        send_exemplars: true
+
+overrides:
+  defaults:
+    # v3 removed the top-level `compactor:` block; retention is an override now.
+    compaction:
+      block_retention: 48h
+    metrics_generator:
+      processors:
+        - service-graphs
+        - span-metrics

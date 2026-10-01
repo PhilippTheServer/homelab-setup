@@ -1,0 +1,68 @@
+---
+# Ensure the images dir exists before downloading the wallpaper (get_url does not
+# create parent dirs). compose_stack re-creates it idempotently during deploy.
+- name: Ensure homepage images directory exists
+  ansible.builtin.file:
+    path: "{{ homelab_base_dir }}/services/homepage/images"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0750'
+
+- name: Download background wallpaper
+  ansible.builtin.get_url:
+    url: https://wallpapercave.com/wp/wp8982796.jpg
+    dest: "{{ homelab_base_dir }}/services/homepage/images/background.jpg"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0640'
+    force: false
+
+- name: Deploy homepage compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: homepage
+    compose_dirs: ["", "config", "images"]
+    compose_templates:
+      - { src: config/settings.yaml.j2, dest: config/settings.yaml }
+      - { src: config/services.yaml.j2, dest: config/services.yaml }
+      - { src: config/widgets.yaml.j2, dest: config/widgets.yaml }
+      - { src: config/bookmarks.yaml.j2, dest: config/bookmarks.yaml }
+      - { src: config/docker.yaml.j2, dest: config/docker.yaml }
+      - { src: docker-compose.yml.j2, dest: docker-compose.yml }
+    # homepage re-reads its config on restart (not recreate) — matches the old
+    # `docker compose restart homepage` handler.
+    compose_restart_services: ["homepage"]
+
+# A rendered services.yaml is no proof the dashboard shows it (Homepage drops what it
+# cannot parse), so ask Homepage itself. Only service names leave the container, never
+# widget config.
+- name: Read the services Homepage serves
+  ansible.builtin.command:
+    cmd: >-
+      docker exec homepage node -e
+      "fetch('http://127.0.0.1:3000/api/services').then(r => r.json())
+      .then(gs => console.log(JSON.stringify(gs.flatMap(g => g.services.map(s => s.name)))))"
+  become_user: "{{ deploy_user }}"
+  register: _homepage_served
+  changed_when: false
+  check_mode: false
+  retries: 10
+  delay: 3
+  until: _homepage_served.rc == 0
+
+- name: Check Homepage shows every service in services.yaml
+  ansible.builtin.assert:
+    that: _homepage_missing | length == 0
+    fail_msg: "Homepage does not show: {{ _homepage_missing | join(', ') }}"
+    quiet: true
+  vars:
+    _homepage_declared: >-
+      {{ lookup('ansible.builtin.template', playbook_dir ~ '/../services/homepage/config/services.yaml.j2')
+         | from_yaml | map('dict2items') | flatten | map(attribute='value') | flatten
+         | map('list') | flatten }}
+    _homepage_missing: "{{ _homepage_declared | difference(_homepage_served.stdout | from_json) }}"
+  # A dry run compares the repo with the dashboard as it is now, so tiles not yet
+  # deployed are reported here instead of aborting the play.
+  ignore_errors: "{{ ansible_check_mode }}"

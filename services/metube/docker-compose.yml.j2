@@ -1,0 +1,58 @@
+---
+services:
+
+  metube:
+    image: ghcr.io/alexta69/metube:{{ metube_version }}
+    container_name: metube
+    restart: unless-stopped
+    environment:
+      # Must match deploy_user on the host — the library tree is owned by it and
+      # CHOWN_DIRS is off, so MeTube has to be that user rather than adopt the tree.
+      PUID: "{{ metube_puid }}"
+      PGID: "{{ metube_pgid }}"
+      # MeTube would otherwise chown DOWNLOAD_DIR on every start, walking the whole
+      # library. Ansible already creates every directory as deploy_user.
+      CHOWN_DIRS: "false"
+      # The whole library tree: OUTPUT_TEMPLATE picks music/ or youtube/, the Podcast
+      # preset podcasts/, and a preset may not write outside this directory.
+      DOWNLOAD_DIR: "{{ metube_container_library_dir }}"
+      AUDIO_DOWNLOAD_DIR: "{{ metube_container_library_dir }}"
+      # Inside the same bind mount as the library, so yt-dlp moves the finished file
+      # into the library with a rename() rather than a copy. A copy across mounts would
+      # let Jellyfin's realtime monitor see a half-written file. incoming/ is not
+      # mounted into Jellyfin at all, so the partials are invisible to it either way.
+      TEMP_DIR: "{{ metube_container_temp_dir }}"
+      STATE_DIR: /state
+      # The folder dropdown lists every subdirectory of DOWNLOAD_DIR — the whole
+      # library. OUTPUT_TEMPLATE already decides the destination, so it is only noise.
+      CUSTOM_DIRS: "false"
+      DEFAULT_THEME: dark
+      # {music,youtube}/<Artist>/<Title> (<Year>)/01 <Title>.<ext> — NAMING.md.
+      # Playlists and channels use the same template rather than their own defaults,
+      # which would group by playlist/channel name instead of by artist.
+      OUTPUT_TEMPLATE: "{{ metube_output_template }}"
+      OUTPUT_TEMPLATE_PLAYLIST: "{{ metube_output_template }}"
+      OUTPUT_TEMPLATE_CHANNEL: "{{ metube_output_template }}"
+      YTDL_OPTIONS_PRESETS: {{ metube_ytdl_options_presets | to_json | to_json }}
+      # Deliberately no YTDL_OPTIONS. MeTube's audio path already adds FFmpegMetadata
+      # and EmbedThumbnail — but only when `writethumbnail` is absent from the options,
+      # so setting it here would silently turn tagging and cover art off.
+    volumes:
+      # The whole media root, not just music/: DOWNLOAD_DIR and TEMP_DIR have to sit in
+      # one mount for the rename above to be atomic.
+      - "{{ jellyfin_media_root }}:/media"
+      - "{{ homelab_base_dir }}/services/metube/state:/state"
+    networks:
+      - proxy
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.metube.rule=Host(`{{ metube_host }}`)"
+      - "traefik.http.routers.metube.entrypoints=websecure"
+      - "traefik.http.routers.metube.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.metube.service=metube"
+      - "traefik.http.services.metube.loadbalancer.server.port=8081"
+      - "traefik.docker.network=proxy"
+
+networks:
+  proxy:
+    external: true

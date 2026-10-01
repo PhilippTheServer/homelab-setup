@@ -1,0 +1,79 @@
+---
+# Headscale configuration — rendered by Ansible
+# Docs: https://github.com/juanfont/headscale/blob/main/config-example.yaml
+
+server_url: "https://vpn.{{ domain }}"
+listen_addr: "0.0.0.0:8080"
+metrics_listen_addr: "0.0.0.0:9090"
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+# Use Tailscale's public DERP servers (no self-hosted DERP needed)
+derp:
+  server:
+    enabled: false
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  auto_update_enabled: true
+  update_frequency: 24h
+
+disable_check_updates: true
+
+# 0.29 removed the top-level ephemeral_node_inactivity_timeout and oidc.expiry
+# keys; both live under node: now. oidc.use_expiry_from_token stays where it is
+# and, when true, makes node.expiry a no-op for OIDC-authenticated nodes.
+node:
+  expiry: 8760h
+  ephemeral:
+    inactivity_timeout: 30m
+
+database:
+  type: postgres
+  postgres:
+    host: headscale-db
+    port: 5432
+    name: headscale
+    user: headscale
+    pass: "{{ vault_headscale_db_password }}"
+    max_open_conns: 10
+    max_idle_conns: 10
+    conn_max_idle_time_secs: 3600
+
+log:
+  level: info
+
+policy:
+  mode: file
+  path: /etc/headscale/acl.hujson
+
+dns:
+  magic_dns: true
+  base_domain: "mesh.{{ domain }}"
+  nameservers:
+    global:
+      - 1.1.1.1
+      - 8.8.8.8
+    split:
+      "{{ internal_subdomain }}.{{ domain }}":
+        - {{ minipc_ip }}
+
+oidc:
+  only_start_if_oidc_is_available: true
+  issuer: "https://auth.{{ domain }}/realms/homelab"
+  client_id: headscale
+  client_secret: "{{ vault_headscale_oidc_secret }}"
+  use_expiry_from_token: false
+  scope:
+    - openid
+    - profile
+    - email
+
+logtail:
+  enabled: false
+

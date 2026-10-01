@@ -1,0 +1,23 @@
+# HashiCorp Vault configuration — rendered by Ansible
+# Uses integrated Raft storage (no separate database required)
+
+ui            = true
+disable_mlock = true   # mlock is handled via IPC_LOCK cap in Docker
+
+api_addr     = "https://vault.{{ internal_subdomain }}.{{ domain }}"
+cluster_addr = "https://vault:8201"
+
+storage "raft" {
+  path    = "/vault/data"
+  node_id = "homelab-vault-1"
+}
+
+listener "tcp" {
+  address     = "0.0.0.0:8200"
+  tls_disable = "true"   # Traefik terminates TLS; traffic is container-local
+}
+
+telemetry {
+  prometheus_retention_time = "30s"
+  disable_hostname          = true
+}

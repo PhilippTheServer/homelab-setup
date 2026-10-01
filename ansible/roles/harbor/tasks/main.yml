@@ -1,0 +1,128 @@
+---
+# get_url sends a conditional request even when dest exists, which made every run
+# depend on GitHub being reachable. Only download when the installer is missing.
+- name: Check for the Harbor online installer
+  stat:
+    path: "/tmp/harbor-{{ harbor_version }}.tgz"
+  register: _harbor_installer
+
+- name: Download Harbor online installer
+  get_url:
+    url: "https://github.com/goharbor/harbor/releases/download/{{ harbor_version }}/harbor-online-installer-{{ harbor_version }}.tgz"
+    dest: "/tmp/harbor-{{ harbor_version }}.tgz"
+    mode: '0644'
+  register: _harbor_download
+  retries: 3
+  delay: 10
+  until: _harbor_download is succeeded
+  when: not _harbor_installer.stat.exists
+
+- name: Extract Harbor installer
+  unarchive:
+    src: "/tmp/harbor-{{ harbor_version }}.tgz"
+    dest: "{{ homelab_base_dir }}"
+    remote_src: true
+    creates: "{{ homelab_base_dir }}/harbor/install.sh"
+
+- name: Create Harbor data and log directories
+  file:
+    path: "{{ item }}"
+    state: directory
+    mode: '0755'
+  loop:
+    - "{{ homelab_base_dir }}/harbor/data"
+    - "{{ homelab_base_dir }}/harbor/log"
+
+- name: Template harbor.yml
+  template:
+    src: "{{ playbook_dir }}/../services/harbor/harbor.yml.j2"
+    dest: "{{ homelab_base_dir }}/harbor/harbor.yml"
+    mode: '0640'
+  notify: restart harbor
+
+- name: Template docker-compose.override.yml
+  template:
+    src: "{{ playbook_dir }}/../services/harbor/docker-compose.override.yml.j2"
+    dest: "{{ homelab_base_dir }}/harbor/docker-compose.override.yml"
+    mode: '0644'
+  notify: restart harbor
+
+# NOTE: guarded by `creates:`, so editing harbor.yml does NOT regenerate
+# docker-compose.yml — the generated file keeps whatever `http.port` was set when
+# prepare last ran. Delete common/config/ to force a regeneration.
+- name: Initial Harbor prepare (generates configs from harbor.yml)
+  command:
+    cmd: "./prepare"
+    chdir: "{{ homelab_base_dir }}/harbor"
+  args:
+    creates: "{{ homelab_base_dir }}/harbor/common/config/nginx/nginx.conf"
+
+- name: Ensure Harbor stack is running
+  command:
+    cmd: docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --remove-orphans
+    chdir: "{{ homelab_base_dir }}/harbor"
+  changed_when: false
+
+# Checked through Traefik rather than a host port: harbor.yml's `http.port` only
+# reaches the host if `prepare` has regenerated the compose file since it last
+# changed, so a host-port check silently drifts out of date.
+- name: Wait for Harbor API to be ready
+  uri:
+    url: "https://harbor.{{ internal_subdomain }}.{{ domain }}/api/v2.0/systeminfo"
+    status_code: 200
+  register: _harbor_ready
+  retries: 30
+  delay: 10
+  until: _harbor_ready.status == 200
+
+- name: Get current Harbor auth configuration
+  uri:
+    url: "https://harbor.{{ internal_subdomain }}.{{ domain }}/api/v2.0/configurations"
+    method: GET
+    user: admin
+    password: "{{ vault_harbor_admin_password }}"
+    force_basic_auth: true
+  register: _harbor_cfg
+  # Read-only: runs in check mode too, so a dry run sees the live auth mode.
+  check_mode: false
+
+- name: Configure Harbor OIDC (Keycloak)
+  uri:
+    url: "https://harbor.{{ internal_subdomain }}.{{ domain }}/api/v2.0/configurations"
+    method: PUT
+    user: admin
+    password: "{{ vault_harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      auth_mode: "oidc_auth"
+      oidc_name: "Keycloak"
+      oidc_endpoint: "https://auth.{{ domain }}/realms/homelab"
+      oidc_client_id: "harbor"
+      oidc_client_secret: "{{ vault_harbor_oidc_secret }}"
+      oidc_scope: "openid,profile,email,groups"
+      oidc_verify_cert: true
+      oidc_auto_onboard: true
+      oidc_user_claim: "preferred_username"
+      oidc_groups_claim: "groups"
+    status_code: 200
+  when: _harbor_cfg.json.auth_mode.value != 'oidc_auth'
+
+- name: Report Harbor session timeout change
+  debug:
+    msg: "session_timeout: {{ _harbor_cfg.json.session_timeout.value }} -> {{ harbor_session_timeout_minutes }} min"
+  when: (_harbor_cfg.json.session_timeout.value | int) != (harbor_session_timeout_minutes | int)
+
+- name: Set Harbor session timeout
+  uri:
+    url: "https://harbor.{{ internal_subdomain }}.{{ domain }}/api/v2.0/configurations"
+    method: PUT
+    user: admin
+    password: "{{ vault_harbor_admin_password }}"
+    force_basic_auth: true
+    body_format: json
+    body:
+      session_timeout: "{{ harbor_session_timeout_minutes | int }}"
+    status_code: 200
+  when: (_harbor_cfg.json.session_timeout.value | int) != (harbor_session_timeout_minutes | int)
+  changed_when: true

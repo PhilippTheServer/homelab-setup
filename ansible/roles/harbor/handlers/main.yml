@@ -1,0 +1,12 @@
+---
+- name: run harbor prepare
+  command:
+    cmd: "./prepare"
+    chdir: "{{ homelab_base_dir }}/harbor"
+  listen: "restart harbor"
+
+- name: restart harbor stack
+  command:
+    cmd: docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --remove-orphans
+    chdir: "{{ homelab_base_dir }}/harbor"
+  listen: "restart harbor"

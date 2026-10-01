@@ -1,0 +1,77 @@
+---
+# Clients that need the `groups` client scope attached as a default scope, so that
+# Keycloak accepts `groups` in the authorization request's `scope` parameter and
+# emits the `groups` claim.
+#
+# This cannot live in the realm template alone: Keycloak's Admin API ignores
+# `defaultClientScopes` on a client *update*, so the template's arrays only take
+# effect for clients created by the first-boot import. Existing clients have to be
+# changed through the dedicated `default-client-scopes` sub-resource.
+keycloak_groups_scope_clients:
+  - gitlab
+  - harbor
+
+# Clients the role deletes from the live realm. The client sync only creates and updates,
+# so a client dropped from the realm template stays in Keycloak until it is listed here.
+keycloak_retired_clients:
+  - daily2-app  # daily 2.0 took over daily-app and daily-mcp at the switch-over
+  - daily2-mcp
+
+# Realm-level settings the role keeps in step with the realm template on every run.
+# `--import-realm` applies the template only when the realm is first created, so any
+# other realm-level key in the template takes effect on a fresh instance only.
+keycloak_realm_synced_settings:
+  - accessTokenLifespan
+  - accessTokenLifespanForImplicitFlow
+  - ssoSessionIdleTimeout
+  - ssoSessionMaxLifespan
+  - rememberMe
+  - ssoSessionIdleTimeoutRememberMe
+  - ssoSessionMaxLifespanRememberMe
+  - offlineSessionIdleTimeout
+
+# ── Access: who may sign in to what ───────────────────────────────────────────
+# The realm's default browser flow is keycloak_gated_flow: after any sign-in path,
+# including an existing SSO cookie, users without the realm role keycloak_admin_role get
+# "Access denied". So every client is admin-only unless it is listed here, in which case
+# it is bound to the stock `browser` flow and open to every user in the realm.
+keycloak_admin_role: admin
+keycloak_gated_flow: browser-admin-only
+keycloak_open_clients:
+  - headscale        # the VPN
+  - gym-bro
+  - account-console  # users' own password and profile page
+
+# Accounts the role creates when missing. It never changes one afterwards: the initial
+# password is temporary, so Keycloak makes the user set their own at first sign-in, and
+# profile and password are theirs from then on. Every run asserts that an account without
+# `admin: true` doesn't hold keycloak_admin_role, which would open every client to it.
+keycloak_users:
+  - username: alice
+    firstName: Alice
+    initial_password: "{{ vault_keycloak_alice_initial_password }}"
+  - username: bob
+    firstName: Bob
+    initial_password: "{{ vault_keycloak_bob_initial_password }}"
+  - username: ali
+    firstName: Ali
+    initial_password: "{{ vault_keycloak_ali_initial_password }}"
+
+# The gated flow, depth-first. The stock `browser` flow cannot simply be extended:
+# its sign-in paths are ALTERNATIVEs, and Keycloak ignores ALTERNATIVEs next to a
+# REQUIRED or CONDITIONAL step at the same level. So sign-in is wrapped in its own
+# REQUIRED sub-flow and the gate follows it as a CONDITIONAL sub-flow.
+keycloak_gated_flow_nodes:
+  - { parent: browser-admin-only, subflow: browser-admin-only sign in, requirement: REQUIRED }
+  - { parent: browser-admin-only sign in, provider: auth-cookie, requirement: ALTERNATIVE }
+  - { parent: browser-admin-only sign in, subflow: browser-admin-only credentials, requirement: ALTERNATIVE }
+  - { parent: browser-admin-only credentials, provider: auth-username-password-form, requirement: REQUIRED }
+  - { parent: browser-admin-only credentials, subflow: browser-admin-only otp, requirement: CONDITIONAL }
+  - { parent: browser-admin-only otp, provider: conditional-user-configured, requirement: REQUIRED }
+  - { parent: browser-admin-only otp, provider: auth-otp-form, requirement: REQUIRED }
+  - { parent: browser-admin-only, subflow: browser-admin-only admins only, requirement: CONDITIONAL }
+  - parent: browser-admin-only admins only
+    provider: conditional-user-role
+    requirement: REQUIRED
+    config: { condUserRole: admin, negate: "true" }
+  - { parent: browser-admin-only admins only, provider: deny-access-authenticator, requirement: REQUIRED }

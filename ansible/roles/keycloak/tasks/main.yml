@@ -1,0 +1,383 @@
+---
+# The import dir must exist before the realm JSON is rendered, and the realm JSON must
+# exist before the stack starts (--import-realm reads it at first boot), so dirs + realm
+# render stay bespoke ahead of the compose_stack deploy.
+- name: Create keycloak directories
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0750'
+  loop:
+    - "{{ homelab_base_dir }}/services/keycloak"
+    - "{{ homelab_base_dir }}/services/keycloak/import"
+
+- name: Render realm import JSON
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../services/keycloak/realm-homelab.json.j2"
+    dest: "{{ homelab_base_dir }}/services/keycloak/import/realm-homelab.json"
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: '0640'
+  register: _realm_template
+
+- name: Deploy keycloak compose stack
+  ansible.builtin.include_role:
+    name: compose_stack
+  vars:
+    compose_service: keycloak
+
+# --import-realm at startup only runs when the realm does not yet exist in the DB
+# (IGNORE_EXISTING strategy). When the realm template changes on a running instance,
+# we sync clients directly via the Admin REST API so user accounts are preserved.
+#
+# Creating missing clients runs on every play rather than only when the template
+# changed. Gating the whole sync on `_realm_template.changed` made it a one-shot
+# trigger: if any task after the render failed — Keycloak still restarting, for
+# instance — the next run saw an unchanged template, skipped the sync, and the realm
+# stayed silently out of step with the repo. The POST is naturally idempotent because
+# it only fires for clients the realm does not already have.
+- name: Sync realm clients via Admin API
+  block:
+    - name: Get admin token (client sync)
+      uri:
+        url: "https://auth.{{ domain }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          client_id: admin-cli
+          username: "{{ vault_keycloak_admin_user }}"
+          password: "{{ vault_keycloak_admin_password }}"
+          grant_type: password
+      register: _kc_token_sync
+      # Read-only: runs in check mode too, so a dry run sees the live realm.
+      check_mode: false
+      changed_when: false
+      no_log: true
+      # A changed compose file recreates Keycloak, and the deploy above does not wait
+      # for it; a rebuild for new build options takes about a minute.
+      retries: 30
+      delay: 5
+      until: _kc_token_sync.status == 200
+
+    - name: Read rendered realm JSON
+      slurp:
+        src: "{{ homelab_base_dir }}/services/keycloak/import/realm-homelab.json"
+      register: _realm_raw
+
+    - name: Get existing homelab clients
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients?max=200"
+        headers:
+          Authorization: "Bearer {{ _kc_token_sync.json.access_token }}"
+        status_code: [200, 404]
+      register: _existing_clients
+      check_mode: false
+
+    - name: Build clientId-to-id map
+      set_fact:
+        _client_id_map: >-
+          {{ _existing_clients.json | items2dict(key_name='clientId', value_name='id')
+             if _existing_clients.status == 200 else {} }}
+
+    - name: Create new clients
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ _kc_token_sync.json.access_token }}"
+        body: "{{ item }}"
+        body_format: json
+        status_code: 201
+      loop: "{{ (_realm_raw.content | b64decode | from_json).clients }}"
+      when:
+        - _existing_clients.status == 200
+        - item.clientId not in _client_id_map
+      no_log: true
+
+    - name: Update existing clients
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients/{{ _client_id_map[item.clientId] }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ _kc_token_sync.json.access_token }}"
+        body: "{{ item }}"
+        body_format: json
+        status_code: 204
+      loop: "{{ (_realm_raw.content | b64decode | from_json).clients }}"
+      # Only overwrite clients that already exist when the template actually changed —
+      # a PUT always reports `changed`, so running it unconditionally would make the
+      # role permanently noisy.
+      when:
+        - _realm_template.changed
+        - _existing_clients.status == 200
+        - item.clientId in _client_id_map
+      no_log: true
+
+    - name: Delete retired clients
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients/{{ _client_id_map[item] }}"
+        method: DELETE
+        headers:
+          Authorization: "Bearer {{ _kc_token_sync.json.access_token }}"
+        status_code: 204
+      loop: "{{ keycloak_retired_clients | select('in', _client_id_map) | list }}"
+      changed_when: true
+
+    # The realm roles mapper lives in the 'roles' client scope, not in a client,
+    # so it is not touched by the client sync above. Update it explicitly so that
+    # realm_access.roles is included in the userinfo response (needed for Grafana
+    # role mapping via role_attribute_path). Only needed after a template edit, and
+    # the later tasks read the registers of the earlier ones, so the whole sequence
+    # is gated together.
+    - name: Reapply the realm roles protocol mapper
+      when: _realm_template.changed
+      block:
+        - name: Get client scopes (sync)
+          uri:
+            url: "https://auth.{{ domain }}/admin/realms/homelab/client-scopes"
+            headers:
+              Authorization: "Bearer {{ _kc_token_sync.json.access_token }}"
+          register: _client_scopes_sync
+          check_mode: false
+
+        - name: Set roles scope ID
+          set_fact:
+            _roles_scope_id: "{{ (_client_scopes_sync.json | selectattr('name', 'equalto', 'roles') | list | first).id }}"
+
+        - name: Get protocol mappers for roles scope
+          uri:
+            url: "https://auth.{{ domain }}/admin/realms/homelab/client-scopes/{{ _roles_scope_id }}/protocol-mappers/models"
+            headers:
+              Authorization: "Bearer {{ _kc_token_sync.json.access_token }}"
+          register: _roles_mappers
+          check_mode: false
+
+        - name: Set realm roles mapper ID
+          set_fact:
+            _realm_roles_mapper_id: "{{ (_roles_mappers.json | selectattr('name', 'equalto', 'realm roles') | list | first).id }}"
+
+        - name: Update realm roles mapper to include userinfo claim
+          uri:
+            url: "https://auth.{{ domain }}/admin/realms/homelab/client-scopes/{{ _roles_scope_id }}/protocol-mappers/models/{{ _realm_roles_mapper_id }}"
+            method: PUT
+            headers:
+              Authorization: "Bearer {{ _kc_token_sync.json.access_token }}"
+            body:
+              id: "{{ _realm_roles_mapper_id }}"
+              name: "realm roles"
+              protocol: "openid-connect"
+              protocolMapper: "oidc-usermodel-realm-role-mapper"
+              consentRequired: false
+              config:
+                "user.attribute": "foo"
+                "access.token.claim": "true"
+                "userinfo.token.claim": "true"
+                "claim.name": "realm_access.roles"
+                "jsonType.label": "String"
+                "multivalued": "true"
+            body_format: json
+            status_code: 204
+          no_log: true
+
+# Scope assignments and group management run on every play. They are made idempotent
+# below: the groups-scope PUT is gated on a pre-GET, and the group POST treats 409
+# (already exists) as unchanged.
+- name: Ensure Keycloak realm state (scopes + groups)
+  block:
+    - name: Get admin token (realm state)
+      uri:
+        url: "https://auth.{{ domain }}/realms/master/protocol/openid-connect/token"
+        method: POST
+        body_format: form-urlencoded
+        body:
+          client_id: admin-cli
+          username: "{{ vault_keycloak_admin_user }}"
+          password: "{{ vault_keycloak_admin_password }}"
+          grant_type: password
+      register: _kc_token
+      check_mode: false
+      changed_when: false
+      no_log: true
+
+    - name: Get existing homelab clients (realm state)
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients?max=200"
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+      register: _clients_state
+      check_mode: false
+
+    - name: Build clientId-to-id map (realm state)
+      set_fact:
+        _client_id_map_state: >-
+          {{ _clients_state.json | items2dict(key_name='clientId', value_name='id') }}
+
+    - name: Get client scopes (realm state)
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/client-scopes"
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+      register: _client_scopes
+      check_mode: false
+
+    - name: Set groups scope ID
+      set_fact:
+        _groups_scope_id: "{{ (_client_scopes.json | selectattr('name', 'equalto', 'groups') | list | first).id }}"
+
+    # Harbor sends `groups` in its authorization request (its oidc_scope), so the
+    # scope has to be attached to the client or Keycloak answers the whole request
+    # with `invalid_scope` and Harbor renders that as a bare "Bad Request".
+    - name: Get current default scopes for groups-scope clients
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients/{{ _client_id_map_state[item] }}/default-client-scopes"
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+      register: _groups_scope_defaults
+      check_mode: false
+      loop: "{{ keycloak_groups_scope_clients | select('in', _client_id_map_state) | list }}"
+
+    - name: Add groups scope to client default scopes
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients/{{ _client_id_map_state[item.item] }}/default-client-scopes/{{ _groups_scope_id }}"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+        status_code: [204]
+      loop: "{{ _groups_scope_defaults.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      when: "'groups' not in (item.json | default([]) | map(attribute='name') | list)"
+
+    # Keycloak's built-in offline_access scope maps the offline_access role, and a
+    # client without full scope (daily-mcp) gets the role only through that mapping.
+    # The realm was imported without it; --import-realm never revisits an existing
+    # realm, so the role adds it to the live one.
+    - name: Get the realm roles the offline_access scope maps
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/client-scopes/{{ _offline_scope_id }}/scope-mappings/realm"
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+      register: _offline_scope_roles
+      check_mode: false
+      vars:
+        _offline_scope_id: "{{ (_client_scopes.json | selectattr('name', 'equalto', 'offline_access') | first).id }}"
+
+    - name: Map the offline_access role into the offline_access scope
+      when: "'offline_access' not in (_offline_scope_roles.json | map(attribute='name') | list)"
+      vars:
+        _offline_scope_id: "{{ (_client_scopes.json | selectattr('name', 'equalto', 'offline_access') | first).id }}"
+      block:
+        - name: Get the offline_access realm role
+          uri:
+            url: "https://auth.{{ domain }}/admin/realms/homelab/roles/offline_access"
+            headers:
+              Authorization: "Bearer {{ _kc_token.json.access_token }}"
+          register: _offline_role
+          check_mode: false
+
+        - name: Add the offline_access role to the offline_access scope
+          uri:
+            url: "https://auth.{{ domain }}/admin/realms/homelab/client-scopes/{{ _offline_scope_id }}/scope-mappings/realm"
+            method: POST
+            headers:
+              Authorization: "Bearer {{ _kc_token.json.access_token }}"
+            body: "{{ [_offline_role.json] }}"
+            body_format: json
+            status_code: 204
+          changed_when: true
+
+    # Keycloak refuses the code exchange of a client that requested offline_access but
+    # is granted no offline_access role ("Offline tokens not allowed for the user or
+    # client"). Ask Keycloak for every template client offering the scope; this only
+    # reads the live realm, so a dry run reports a gap without aborting the play.
+    - name: Get the realm roles each offline_access client may put in a token
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/clients/{{ _client_id_map_state[item] }}/evaluate-scopes/scope-mappings/homelab/granted?scope=offline_access"
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+      register: _offline_granted
+      check_mode: false
+      loop: >-
+        {{ _template_clients | selectattr('optionalClientScopes', 'defined')
+           | selectattr('optionalClientScopes', 'contains', 'offline_access')
+           | map(attribute='clientId') | select('in', _client_id_map_state) | list }}
+      vars:
+        _template_clients: >-
+          {{ (lookup('ansible.builtin.template', playbook_dir ~ '/../services/keycloak/realm-homelab.json.j2')
+              | from_json).clients }}
+
+    - name: Check Keycloak lets every offline_access client issue offline tokens
+      assert:
+        that: "'offline_access' in (item.json | map(attribute='name') | list)"
+        fail_msg: "Keycloak refuses offline tokens for {{ item.item }}"
+        quiet: true
+      loop: "{{ _offline_granted.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+      ignore_errors: "{{ ansible_check_mode }}"
+
+    - name: Ensure gitlab-admins group exists
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab/groups"
+        method: POST
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+        body:
+          name: "gitlab-admins"
+        body_format: json
+        status_code: [201, 409]
+      register: _gitlab_admins_group
+      changed_when: _gitlab_admins_group.status == 201
+
+    # `--import-realm` applies realm-level settings only when it creates the realm, so
+    # the synced ones are compared with the template and PUT when they differ. The
+    # template is rendered on the controller rather than read from the host, because in
+    # check mode the render task above does not write the new file.
+    - name: Get live realm settings
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab"
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+      register: _realm_live
+      check_mode: false
+
+    - name: Work out which synced realm settings differ from the template
+      set_fact:
+        _realm_settings_drift: >-
+          {{ dict(keycloak_realm_synced_settings
+                  | zip(keycloak_realm_synced_settings | map('extract', _realm_desired)))
+             | dict2items
+             | reject('in', dict(keycloak_realm_synced_settings
+                                 | zip(keycloak_realm_synced_settings | map('extract', _realm_live.json)))
+                            | dict2items)
+             | items2dict }}
+      vars:
+        _realm_desired: >-
+          {{ lookup('ansible.builtin.template', playbook_dir ~ '/../services/keycloak/realm-homelab.json.j2')
+             | from_json }}
+      no_log: true
+
+    - name: Report realm settings that will change
+      debug:
+        msg: "{{ item.key }}: {{ _realm_live.json[item.key] }} -> {{ item.value }}"
+      loop: "{{ _realm_settings_drift | dict2items }}"
+      loop_control:
+        label: "{{ item.key }}"
+
+    - name: Apply realm settings from the template
+      uri:
+        url: "https://auth.{{ domain }}/admin/realms/homelab"
+        method: PUT
+        headers:
+          Authorization: "Bearer {{ _kc_token.json.access_token }}"
+        body: "{{ _realm_settings_drift }}"
+        body_format: json
+        status_code: 204
+      when: _realm_settings_drift | length > 0
+      changed_when: true
+      no_log: true
+
+- name: Enforce who may sign in to what
+  ansible.builtin.import_tasks: access.yml

@@ -1,0 +1,128 @@
+---
+services:
+
+  daily2-frontend:
+    image: "{{ daily2_registry }}/{{ daily2_harbor_project }}/frontend:{{ daily2_version }}"
+    container_name: daily2-frontend
+    restart: unless-stopped
+    environment:
+      # Written into assets/runtime-config.json at container start. The browser talks to
+      # the API on the same origin; nginx proxies /api/ to the backend, so there is no
+      # CORS and no API hostname baked into the bundle.
+      API_BASE: "/api/v2"
+      BACKEND_URL: "http://daily2-backend:8000"
+      KEYCLOAK_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_REALM: "homelab"
+      KEYCLOAK_CLIENT_ID: "daily-app"
+    depends_on:
+      - daily2-backend
+    networks:
+      - proxy
+      - internal
+    healthcheck:
+      # 127.0.0.1, not localhost: the container resolves localhost to ::1 first and
+      # nginx listens on IPv4 only, so the check would fail and Traefik drops
+      # unhealthy containers from the router entirely (404 rather than 502).
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1/healthz || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.daily2.rule=Host(`daily.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.daily2.entrypoints=websecure"
+      - "traefik.http.routers.daily2.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.daily2.service=daily2"
+      - "traefik.http.services.daily2.loadbalancer.server.port=80"
+      - "traefik.docker.network=proxy"
+
+  daily2-backend:
+    image: "{{ daily2_registry }}/{{ daily2_harbor_project }}/backend:{{ daily2_version }}"
+    container_name: daily2-backend
+    restart: unless-stopped
+    environment:
+      # urlencode leaves '/' alone (it treats the value as a path), which would cut the
+      # URL short for a base64 password — escape it explicitly. psycopg 3 is the driver.
+      DATABASE_URL: "postgresql+psycopg://daily2:{{ vault_daily2_db_password | urlencode | replace('/', '%2F') }}@daily2-db/daily2"
+      # Same host for both: tokens are issued to the browser under the public name,
+      # and the API resolves it over the LAN through Pi-hole.
+      KEYCLOAK_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_PUBLIC_URL: "https://auth.{{ domain }}"
+      KEYCLOAK_REALM: "homelab"
+      # v1's clients, taken over at the switch-over: the claude.ai connector keeps its
+      # client ID, secret and refresh token, so it does not have to sign in again.
+      APP_CLIENT_ID: "daily-app"
+      MCP_CLIENT_ID: "daily-mcp"
+      OWNER_SUB: "{{ daily_owner_sub }}"
+      MCP_RESOURCE_URL: "https://daily-mcp.{{ domain }}/mcp"
+      MCP_ALLOWED_HOSTS: '["daily-mcp.{{ domain }}"]'
+      # gym-bro accepts exactly one EXPORT_CLIENT_ID, daily-gymbro-sync. Both backends
+      # are on the shared proxy network, so the hostname resolves without going through
+      # Traefik.
+      GYM_BRO_URL: "http://gym-bro-backend:8000"
+      GYM_BRO_CLIENT_ID: "daily-gymbro-sync"
+      GYM_BRO_CLIENT_SECRET: "{{ vault_daily_gymbro_sync_secret }}"
+    depends_on:
+      daily2-db:
+        condition: service_healthy
+    healthcheck:
+      # The image has neither curl nor wget.
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 120s
+      start_interval: 5s
+    networks:
+      - proxy
+      - internal
+      - db
+    labels:
+      # The public MCP endpoint: only /mcp and the OAuth protected-resource metadata are
+      # routed here. The allowlist middleware is the actual gate — Traefik drops
+      # everything outside daily2_mcp_allowed_sources before it reaches the container.
+      - "traefik.enable=true"
+      - "traefik.http.routers.daily2-mcp.rule=Host(`daily-mcp.{{ domain }}`) && (Path(`/mcp`) || PathPrefix(`/.well-known/oauth-protected-resource`))"
+      - "traefik.http.routers.daily2-mcp.entrypoints=websecure"
+      - "traefik.http.routers.daily2-mcp.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.daily2-mcp.service=daily2-mcp"
+      - "traefik.http.routers.daily2-mcp.middlewares=daily2-mcp-allowlist,daily2-mcp-ratelimit"
+      - "traefik.http.middlewares.daily2-mcp-allowlist.ipallowlist.sourcerange={{ daily2_mcp_allowed_sources | join(',') }}"
+      - "traefik.http.middlewares.daily2-mcp-ratelimit.ratelimit.average=20"
+      - "traefik.http.middlewares.daily2-mcp-ratelimit.ratelimit.burst=40"
+      - "traefik.http.services.daily2-mcp.loadbalancer.server.port=8000"
+      - "traefik.docker.network=proxy"
+
+  daily2-db:
+    image: "postgres:{{ postgres_version }}"
+    container_name: daily2-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: daily2
+      POSTGRES_USER: daily2
+      POSTGRES_PASSWORD: "{{ vault_daily2_db_password }}"
+    volumes:
+      - daily2_db:/var/lib/postgresql
+    networks:
+      - db
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U daily2 -d daily2"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  proxy:
+    external: true
+  internal:
+    name: daily2_internal
+    internal: true
+  db:
+    name: daily2_db_net
+    internal: true
+
+volumes:
+  daily2_db:
+    name: daily2_db

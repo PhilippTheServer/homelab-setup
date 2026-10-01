@@ -1,0 +1,40 @@
+---
+jellyfin_media_trees:
+  - library
+  - incoming
+
+# Every Jellyfin library, as a path relative to each tree above. Adding an entry here
+# and re-running the role creates it under both trees; the library itself still has to
+# be added once in the Jellyfin UI, where it needs the content type listed in the
+# role README's library table.
+#
+# A library folder may only hold ONE content type, which is why anime is split —
+# anime/films is a Movies library and anime/series is a Shows library.
+jellyfin_libraries:
+  - films
+  - series
+  - anime/films
+  - anime/series
+  - documentaries
+  - music
+  - audiobooks
+  - podcasts
+  - youtube
+
+# Jellyfin content type per library, used to generate the table in NAMING.md. This is
+# documentation only — Jellyfin has no API-free way to declare libraries, so the type
+# is still chosen by hand when adding the library in the UI.
+jellyfin_library_types:
+  films: Movies
+  series: Shows
+  anime/films: Movies
+  anime/series: Shows
+  documentaries: Movies
+  music: Music
+  audiobooks: Books
+  podcasts: Books
+  youtube: Home Videos
+
+# Jellyfin's own API, reached from the Mini PC through Traefik — Pi-hole resolves the
+# name to the LAN IP. Used to keep library options in sync with this repo.
+jellyfin_url: "https://media.{{ internal_subdomain }}.{{ domain }}"

@@ -1,0 +1,40 @@
+# Ansible Vault password files (no longer used — secrets are in HashiCorp Vault)
+.vault_pass
+.vault_password
+*.vault_pass
+
+# Local overrides
+*.local.yml
+ansible/group_vars/all/local.yml
+
+# Ansible retry files
+*.retry
+
+# SSH keys
+*.pem
+*.key
+id_rsa
+id_ed25519
+
+# Python virtualenv for the Ansible control node
+.venv/
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Harbor installer artifacts (downloaded at deploy time)
+services/harbor/harbor-offline-installer-*.tgz
+services/harbor/harbor/
+services/harbor/common/
+services/harbor/prepare
+services/harbor/install.sh
+services/harbor/docker-compose.yml
+
+.opencode

@@ -1,0 +1,186 @@
+---
+- name: Check Vault status
+  command: docker exec vault vault status -format=json
+  register: vault_status_raw
+  changed_when: false
+  failed_when: vault_status_raw.rc == 1
+  # Read-only: running it in check mode lets a dry run notice a sealed Vault.
+  check_mode: false
+
+- name: Abort if Vault is sealed
+  fail:
+    msg: "Vault is sealed — unseal it first with 'docker exec -it vault vault operator unseal'"
+  when: vault_status_raw.rc != 0
+
+- name: Enable KV v2 secrets engine at secret/
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault secrets enable -version=2 -path=secret kv
+  register: r
+  changed_when: "'Successfully enabled' in r.stdout"
+  failed_when: r.rc != 0 and 'path is already in use' not in r.stderr
+
+- name: Enable OIDC auth method
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault auth enable oidc
+  register: r
+  changed_when: "'Successfully enabled' in r.stdout"
+  failed_when: r.rc != 0 and 'path is already in use' not in r.stderr
+
+- name: Configure OIDC with Keycloak
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault write auth/oidc/config
+    oidc_discovery_url="https://auth.{{ domain }}/realms/homelab"
+    oidc_client_id="hcvault"
+    oidc_client_secret="{{ vault_hcvault_oidc_secret }}"
+    default_role="admin"
+  changed_when: false  # declarative `vault write` (re-applying identical config is a no-op; the CLI gives no created-vs-updated signal)
+
+- name: Configure OIDC admin role
+  shell: |
+    docker exec \
+      -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}" \
+      vault vault write auth/oidc/role/admin \
+      bound_audiences="hcvault" \
+      allowed_redirect_uris="https://vault.{{ internal_subdomain }}.{{ domain }}/ui/vault/auth/oidc/oidc/callback" \
+      allowed_redirect_uris="http://localhost:8250/oidc/callback" \
+      user_claim="sub" \
+      token_policies="admin" \
+      token_ttl="168h"
+  changed_when: false  # declarative `vault write` (re-applying identical config is a no-op; the CLI gives no created-vs-updated signal)
+
+- name: Write admin policy
+  shell: |
+    docker exec -i \
+      -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}" \
+      vault vault policy write admin - <<'EOF'
+    path "*" {
+      capabilities = ["create", "read", "update", "patch", "delete", "list", "sudo"]
+    }
+    EOF
+  changed_when: false  # declarative `vault write` (re-applying identical config is a no-op; the CLI gives no created-vs-updated signal)
+
+- name: Write ci-cd policy
+  shell: |
+    docker exec -i \
+      -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}" \
+      vault vault policy write ci-cd - <<'EOF'
+    path "secret/data/ci-cd/*" {
+      capabilities = ["read", "list"]
+    }
+    path "secret/metadata/ci-cd/*" {
+      capabilities = ["list"]
+    }
+    path "secret/data/ansible" {
+      capabilities = ["read"]
+    }
+    path "ssh/sign/ci-cd" {
+      capabilities = ["create", "update"]
+    }
+    EOF
+  changed_when: false  # declarative `vault write` (re-applying identical config is a no-op; the CLI gives no created-vs-updated signal)
+
+- name: Enable AppRole auth method
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault auth enable approle
+  register: r
+  changed_when: "'Successfully enabled' in r.stdout"
+  failed_when: r.rc != 0 and 'path is already in use' not in r.stderr
+
+- name: Create CI/CD AppRole
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault write auth/approle/role/ci-cd
+    token_policies="ci-cd"
+    token_ttl="1h"
+    token_max_ttl="4h"
+    secret_id_ttl="0"
+  changed_when: false  # declarative `vault write` (re-applying identical config is a no-op; the CLI gives no created-vs-updated signal)
+
+- name: Enable SSH secrets engine
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault secrets enable -path=ssh ssh
+  register: r
+  changed_when: "'Successfully enabled' in r.stdout"
+  failed_when: r.rc != 0 and 'path is already in use' not in r.stderr
+
+- name: Generate SSH CA key pair in Vault
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault write ssh/config/ca generate_signing_key=true
+  register: r
+  changed_when: "'keys cannot be replaced' not in r.stderr and 'keys are already configured' not in r.stderr"
+  failed_when: r.rc != 0 and 'keys cannot be replaced' not in r.stderr and 'keys are already configured' not in r.stderr
+
+- name: Create SSH signing role for CI/CD
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault write ssh/roles/ci-cd
+    key_type=ca
+    allowed_users="{{ deploy_user }}"
+    default_user="{{ deploy_user }}"
+    ttl=30m
+    max_ttl=1h
+    allow_user_certificates=true
+  changed_when: false  # declarative `vault write` (re-applying identical config is a no-op; the CLI gives no created-vs-updated signal)
+
+- name: Create SSH signing role for users
+  shell: |
+    docker exec -i \
+      -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}" \
+      vault vault write ssh/roles/user - <<'EOF'
+    {
+      "key_type": "ca",
+      "allowed_users": "{{ deploy_user }}",
+      "default_user": "{{ deploy_user }}",
+      "ttl": "8h",
+      "max_ttl": "24h",
+      "allow_user_certificates": true,
+      "default_extensions": {
+        "permit-pty": "",
+        "permit-port-forwarding": ""
+      }
+    }
+    EOF
+  changed_when: false  # declarative `vault write` (re-applying identical config is a no-op; the CLI gives no created-vs-updated signal)
+
+- name: Read Vault SSH CA public key
+  shell: >
+    docker exec
+    -e VAULT_TOKEN="{{ lookup('env', 'VAULT_TOKEN') }}"
+    vault vault read -field=public_key ssh/config/ca
+  register: vault_ssh_ca_pubkey
+  changed_when: false
+  # Anything but a key here would be written to /etc/ssh/vault-ca.pub below and lock
+  # out every Vault-signed SSH login.
+  failed_when: vault_ssh_ca_pubkey.rc != 0 or not vault_ssh_ca_pubkey.stdout.startswith('ssh-')
+  # Read-only. Skipped in check mode, the copy below would diff against an empty key.
+  check_mode: false
+
+- name: Install Vault SSH CA public key on host
+  copy:
+    content: "{{ vault_ssh_ca_pubkey.stdout }}\n"
+    dest: /etc/ssh/vault-ca.pub
+    mode: '0644'
+  become: true
+  notify: restart sshd
+
+- name: Configure sshd to trust Vault CA
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    line: "TrustedUserCAKeys /etc/ssh/vault-ca.pub"
+    state: present
+  become: true
+  notify: restart sshd

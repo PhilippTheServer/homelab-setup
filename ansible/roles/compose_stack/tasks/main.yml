@@ -1,0 +1,94 @@
+---
+- name: "compose_stack | assert compose_service is set"
+  ansible.builtin.assert:
+    that:
+      - compose_service is defined
+      - compose_service | length > 0
+    fail_msg: "compose_stack requires the 'compose_service' variable to be set"
+    quiet: true
+
+- name: "{{ compose_service }} | create service directories"
+  ansible.builtin.file:
+    path: "{{ homelab_base_dir }}/services/{{ compose_service }}/{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "{{ compose_dir_mode }}"
+  loop: "{{ compose_dirs }}"
+
+- name: "{{ compose_service }} | create extra (absolute) directories"
+  ansible.builtin.file:
+    path: "{{ item }}"
+    state: directory
+    owner: "{{ deploy_user }}"
+    group: "{{ deploy_user }}"
+    mode: "{{ compose_dir_mode }}"
+  loop: "{{ compose_extra_dirs }}"
+
+- name: "{{ compose_service }} | render templates"
+  ansible.builtin.template:
+    src: "{{ playbook_dir }}/../services/{{ compose_service }}/{{ item.src }}"
+    dest: "{{ homelab_base_dir }}/services/{{ compose_service }}/{{ item.dest }}"
+    # Set preserve_perms: true on an item whose ownership/mode is managed by its own
+    # container (e.g. linuxserver images chown their bind-mounted config) — otherwise
+    # Ansible and the container fight over it and the file flaps changed every run.
+    owner: "{{ omit if (item.preserve_perms | default(false)) else deploy_user }}"
+    group: "{{ omit if (item.preserve_perms | default(false)) else deploy_user }}"
+    mode: "{{ omit if (item.preserve_perms | default(false)) else (item.mode | default('0640')) }}"
+  loop: "{{ compose_templates }}"
+  register: _compose_templates
+
+- name: "{{ compose_service }} | deploy stack"
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_base_dir }}/services/{{ compose_service }}"
+    recreate: "{{ compose_recreate }}"
+    pull: "{{ compose_pull }}"
+    remove_orphans: true
+    wait: "{{ compose_wait }}"
+    wait_timeout: "{{ compose_wait_timeout }}"
+  become_user: "{{ deploy_user }}"
+  register: _compose_up
+
+# Services in compose_restart_services read bind-mounted config files that the compose
+# file doesn't describe, so changing those files needs a restart. Decide by time, not by
+# what this run changed: restart each such service whose container started before the
+# stack's newest config file was written. Gating on "templates changed and the deploy
+# changed nothing" skipped the restart whenever any other service was recreated, and
+# never caught up on the next run; this also recovers a run that failed in between.
+- name: "{{ compose_service }} | find services running on older config"
+  ansible.builtin.shell:
+    cmd: |
+      set -eu
+      cd {{ homelab_base_dir }}/services/{{ compose_service }}
+      newest=$(stat -c %Y {{ _config_files | map('quote') | join(' ') }} | sort -n | tail -1)
+      for service in {{ compose_restart_services | map('quote') | join(' ') }}; do
+        id=$(docker compose ps -q "$service")
+        [ -n "$id" ] || continue
+        started=$(date -d "$(docker inspect -f '{% raw %}{{.State.StartedAt}}{% endraw %}' "$id")" +%s)
+        [ "$started" -ge "$newest" ] || echo "$service"
+      done
+    executable: /bin/bash
+  vars:
+    _config_files: >-
+      {{ compose_templates | rejectattr('dest', 'equalto', 'docker-compose.yml')
+         | map(attribute='dest') | list }}
+  register: _compose_stale
+  changed_when: false
+  check_mode: false
+  become_user: "{{ deploy_user }}"
+  when:
+    - compose_restart_services | length > 0
+    - _config_files | length > 0
+
+- name: "{{ compose_service }} | report services running on older config"
+  ansible.builtin.debug:
+    msg: "{{ _compose_stale.stdout_lines }}"
+  when: _compose_stale.stdout_lines | default([]) | length > 0
+
+- name: "{{ compose_service }} | restart services running on older config"
+  community.docker.docker_compose_v2:
+    project_src: "{{ homelab_base_dir }}/services/{{ compose_service }}"
+    state: restarted
+    services: "{{ _compose_stale.stdout_lines }}"
+  become_user: "{{ deploy_user }}"
+  when: _compose_stale.stdout_lines | default([]) | length > 0

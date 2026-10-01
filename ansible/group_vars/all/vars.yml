@@ -1,0 +1,174 @@
+---
+# ── Network ────────────────────────────────────────────────────────────────────
+domain: "example.com"
+internal_subdomain: "home"
+minipc_ip: "192.168.178.20"
+# LAN address of the dev-lab VM on atlas, which terminates TLS for ai.home itself. Tailnet
+# clients reach it through this machine's 192.168.178.0/24 subnet route.
+dev_lab_ip: "192.168.178.62"
+
+# ── Ansible / Deploy ───────────────────────────────────────────────────────────
+deploy_user: philipp
+homelab_base_dir: /opt/homelab
+
+# Root of the media tree on the host. Two sibling trees live under it:
+#
+#   library/   bind-mounted read-only into Jellyfin as /media
+#   incoming/  staging, deliberately NOT mounted into Jellyfin — the scanner can never
+#              see a half-transferred or badly-named file
+#
+# Both are on the same filesystem, so promoting a finished download is an atomic rename
+# rather than a copy Jellyfin could catch midway. Shared by the jellyfin and metube
+# roles, which is why it lives here rather than in either role's defaults.
+jellyfin_media_root: "{{ homelab_base_dir }}/media"
+
+# ── Let's Encrypt ──────────────────────────────────────────────────────────────
+traefik_acme_email: "admin@example.com"
+letsencrypt_staging: false
+
+# ── Service versions (pin these, update deliberately) ──────────────────────────
+# Renovate reads the annotation above each pin; see renovate.json5. A pin with no
+# annotation is never updated, which scripts/check-renovate-coverage.py rejects
+# unless it is on that script's documented exclusion list.
+# renovate: datasource=docker depName=traefik
+traefik_version: "v3.7"
+# DDNS sidecar in the traefik stack. LinuxServer tags carry an -lsNNN build
+# counter that `loose` versioning reads as older than a bare 4.0.0, which turns
+# every update into a downgrade — hence the explicit pattern.
+# renovate: datasource=docker depName=lscr.io/linuxserver/ddclient versioning=regex:^v(?<major>\d+)\.(?<minor>\d+)\.(?<patch>\d+)-ls(?<build>\d+)$
+ddclient_version: "v4.0.0-ls232"
+# renovate: datasource=docker depName=quay.io/keycloak/keycloak
+keycloak_version: "26.7"
+# renovate: datasource=docker depName=headscale/headscale
+headscale_version: "v0.29.3"
+# Headscale's web UI, deployed alongside it.
+# renovate: datasource=docker depName=ghcr.io/tale/headplane
+headplane_version: "0.7.1"
+# renovate: datasource=docker depName=hashicorp/vault
+hcvault_version: "2.1"
+# renovate: datasource=docker depName=vaultwarden/server
+vaultwarden_version: "1.37.3"
+# renovate: datasource=docker depName=postgres
+postgres_version: "18-alpine"
+# Tracked but not currently running: GitLab costs ~4GB of RAM and is stopped
+# while it is not in active use. The pin stays current so bringing it back up is
+# a one-liner rather than an archaeology exercise.
+# renovate: datasource=docker depName=gitlab/gitlab-ce versioning=loose
+gitlab_version: "19.4.0-ce.0"
+gitlab_homepage_user_id: "2"
+# renovate: datasource=github-releases depName=goharbor/harbor
+harbor_version: "v2.15.2"
+# renovate: datasource=docker depName=pihole/pihole versioning=loose
+pihole_version: "2026.09.0"
+# renovate: datasource=docker depName=ghcr.io/gethomepage/homepage
+homepage_version: "v2.4.0"
+# renovate: datasource=docker depName=grafana/grafana
+grafana_version: "13.2.2"
+# renovate: datasource=docker depName=prom/prometheus
+prometheus_version: "v3.14.0"
+# renovate: datasource=docker depName=grafana/loki
+loki_version: "3.7.8"
+# Was shared with loki_version until the two diverged: Grafana froze Promtail in
+# favour of Alloy, so 3.6.11 is its last tag and loki 3.6.17 does not exist for
+# it. Separate pins from here; migrating to Alloy is the real fix.
+# renovate: datasource=docker depName=grafana/promtail
+promtail_version: "3.6.11"
+# renovate: datasource=docker depName=grafana/tempo
+tempo_version: "3.0.3"
+# renovate: datasource=docker depName=prom/node-exporter
+node_exporter_version: "v1.12.1"
+# renovate: datasource=docker depName=gcr.io/cadvisor/cadvisor
+cadvisor_version: "v0.55.1"
+# renovate: datasource=docker depName=ghcr.io/paperless-ngx/paperless-ngx
+paperless_version: "3.2"
+# The three sidecars in the paperless stack.
+# renovate: datasource=docker depName=redis
+redis_version: "8-alpine"
+# renovate: datasource=docker depName=gotenberg/gotenberg
+gotenberg_version: "8"
+# 4.0.0, not the "26.04" this image reports as org.opencontainers.image.version —
+# that label carries its Ubuntu base version, not the Tika release.
+# renovate: datasource=docker depName=apache/tika versioning=loose
+tika_version: "4.0.0"
+# renovate: datasource=docker depName=jellyfin/jellyfin
+jellyfin_version: "10.11.11"
+# Unpinned on purpose: MeTube is a yt-dlp wrapper and yt-dlp breaks whenever
+# YouTube changes, so a pinned tag rots into a downloader that no longer works.
+# The image is rebuilt on every yt-dlp stable release.
+metube_version: "latest"
+# renovate: datasource=docker depName=eclipse-mosquitto
+mosquitto_version: "2.0.22"
+# renovate: datasource=docker depName=miniflux/miniflux
+miniflux_version: "2.3.3"
+# Self-built images in Harbor — bump to publish a new build of the app. Never
+# annotated: Renovate must not touch these.
+gym_bro_version: "1.2.0"
+library_version: "1.1.1"
+daily2_version: "0.1.0"
+
+# ── daily (owner-scoped in M1; multi-user arrives later) ────────────────────────
+daily_owner_sub: "00000000-0000-4000-8000-000000000001"
+
+# ── claude.ai MCP endpoint (daily-mcp) ──────────────────────────────────────────
+# Source ranges the Traefik allowlist lets through: Anthropic (claude.ai's outbound
+# range), the home LAN, and the Headscale VPN mesh. Everyone else gets a 403 before
+# the request reaches a backend.
+mcp_allowed_sources:
+  - "160.79.104.0/21"   # Anthropic
+  - "192.168.178.0/24"  # LAN
+  - "100.64.0.0/10"     # Headscale VPN mesh
+
+# ── library (single-owner: any other realm account gets a 403) ─────────────────
+library_owner_sub: "00000000-0000-4000-8000-000000000001"
+
+# ── Secrets (fetched from HashiCorp Vault at runtime) ──────────────────────────
+# Requires VAULT_TOKEN in the environment before running any playbook.
+# All fields live in a single KV v2 entry at secret/data/ansible.
+# Field names = variable names without the vault_ prefix.
+_vault_secrets: "{{ lookup('community.hashi_vault.hashi_vault', 'secret/data/ansible') }}"
+
+vault_minipc_passwd:            "{{ _vault_secrets.minipc_passwd }}"
+vault_namecheap_api_user:       "{{ _vault_secrets.namecheap_api_user }}"
+vault_namecheap_api_key:        "{{ _vault_secrets.namecheap_api_key }}"
+vault_namecheap_ddns_password:  "{{ _vault_secrets.namecheap_ddns_password }}"
+vault_traefik_dashboard_auth:   "{{ _vault_secrets.traefik_dashboard_auth }}"
+vault_keycloak_db_password:     "{{ _vault_secrets.keycloak_db_password }}"
+vault_keycloak_admin_user:      "{{ _vault_secrets.keycloak_admin_user }}"
+vault_keycloak_admin_password:  "{{ _vault_secrets.keycloak_admin_password }}"
+vault_keycloak_alice_initial_password: "{{ _vault_secrets.keycloak_alice_initial_password }}"
+vault_keycloak_bob_initial_password: "{{ _vault_secrets.keycloak_bob_initial_password }}"
+vault_keycloak_ali_initial_password:   "{{ _vault_secrets.keycloak_ali_initial_password }}"
+vault_headscale_db_password:    "{{ _vault_secrets.headscale_db_password }}"
+vault_headscale_oidc_secret:    "{{ _vault_secrets.headscale_oidc_secret }}"
+vault_headplane_api_key:        "{{ _vault_secrets.headplane_api_key }}"
+vault_headplane_cookie_secret:  "{{ _vault_secrets.headplane_cookie_secret }}"
+vault_hcvault_oidc_secret:      "{{ _vault_secrets.hcvault_oidc_secret }}"
+vault_vaultwarden_db_password:  "{{ _vault_secrets.vaultwarden_db_password }}"
+vault_vaultwarden_admin_token:  "{{ _vault_secrets.vaultwarden_admin_token }}"
+vault_vaultwarden_oidc_secret:  "{{ _vault_secrets.vaultwarden_oidc_secret }}"
+vault_gitlab_root_password:     "{{ _vault_secrets.gitlab_root_password }}"
+vault_gitlab_oidc_secret:       "{{ _vault_secrets.gitlab_oidc_secret }}"
+vault_gitlab_api_token:         "{{ _vault_secrets.gitlab_api_token }}"
+vault_harbor_admin_password:  "{{ _vault_secrets.harbor_admin_password }}"
+vault_harbor_db_password:     "{{ _vault_secrets.harbor_db_password }}"
+vault_harbor_oidc_secret:     "{{ _vault_secrets.harbor_oidc_secret }}"
+vault_pihole_webpassword:       "{{ _vault_secrets.pihole_webpassword }}"
+vault_homepage_oidc_secret:     "{{ _vault_secrets.homepage_oidc_secret }}"
+vault_openchamber_oidc_secret:  "{{ _vault_secrets.openchamber_oidc_secret }}"
+vault_homepage_nextauth_secret: "{{ _vault_secrets.homepage_nextauth_secret }}"
+vault_grafana_admin_password:   "{{ _vault_secrets.grafana_admin_password }}"
+vault_grafana_oidc_secret:      "{{ _vault_secrets.grafana_oidc_secret }}"
+vault_paperless_db_password:    "{{ _vault_secrets.paperless_db_password }}"
+vault_paperless_secret_key:     "{{ _vault_secrets.paperless_secret_key }}"
+vault_paperless_admin_password: "{{ _vault_secrets.paperless_admin_password }}"
+vault_paperless_oidc_secret:    "{{ _vault_secrets.paperless_oidc_secret }}"
+vault_paperless_api_token:      "{{ _vault_secrets.paperless_api_token }}"
+vault_jellyfin_oidc_secret:     "{{ _vault_secrets.jellyfin_oidc_secret }}"
+vault_jellyfin_api_key:         "{{ _vault_secrets.jellyfin_api_key }}"
+vault_mqtt_passwd:              "{{ _vault_secrets.mqtt_passwd }}"
+vault_gym_bro_db_password:      "{{ _vault_secrets.gym_bro_db_password }}"
+vault_daily_mcp_oidc_secret:    "{{ _vault_secrets.daily_mcp_oidc_secret }}"
+vault_daily_gymbro_sync_secret: "{{ _vault_secrets.daily_gymbro_sync_secret }}"
+vault_daily2_db_password:       "{{ _vault_secrets.daily2_db_password }}"
+vault_library_db_password:      "{{ _vault_secrets.library_db_password }}"
+vault_library_miniflux_admin_password: "{{ _vault_secrets.library_miniflux_admin_password }}"

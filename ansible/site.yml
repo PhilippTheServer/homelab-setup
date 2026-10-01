@@ -1,0 +1,68 @@
+---
+- name: Homelab — provision and deploy all services
+  hosts: minipc
+  become: true
+
+  roles:
+#    - role: common
+#      tags: [common]
+
+    - role: ufw
+      tags: [ufw]
+
+    - role: docker-log-limit
+      tags: [docker-log-limit]
+
+    - role: traefik
+      tags: [traefik]
+
+    - role: keycloak
+      tags: [keycloak]
+
+    - role: headscale
+      tags: [headscale]
+
+    - role: tailscale-client
+      tags: [tailscale-client]
+
+    - role: hcvault
+      tags: [hcvault]
+
+    - role: vaultwarden
+      tags: [vaultwarden]
+
+    - role: pihole
+      tags: [pihole]
+
+    - role: gitlab
+      tags: [gitlab]
+
+    - role: harbor
+      tags: [harbor]
+
+    - role: homepage
+      tags: [homepage]
+
+    - role: paperless
+      tags: [paperless]
+
+    - role: jellyfin
+      tags: [jellyfin]
+
+    - role: metube
+      tags: [metube]
+
+    - role: monitoring
+      tags: [monitoring]
+
+    - role: mqtt
+      tags: [mqtt]
+
+    - role: gym-bro
+      tags: [gym-bro]
+
+    - role: library
+      tags: [library]
+
+    - role: daily2
+      tags: [daily2]

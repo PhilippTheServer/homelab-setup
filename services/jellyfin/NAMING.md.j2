@@ -1,0 +1,112 @@
+# Media naming guide
+
+Managed by Ansible (`ansible/roles/jellyfin`) — edit the template in the repo, not this file.
+
+## Where things go
+
+```
+{{ jellyfin_media_root }}/
+├── incoming/     drop uploads here; Jellyfin cannot see this tree
+└── library/      mounted read-only at /media inside the container
+```
+
+Upload into `incoming/<kind>/`, rename to the conventions below, then move it across:
+
+```bash
+mv "{{ jellyfin_media_root }}/incoming/films/Dune Part Two (2024)" \
+   "{{ jellyfin_media_root }}/library/films/"
+```
+
+Both trees are on the same filesystem, so the move is atomic — Jellyfin never sees a
+partially copied file. Copying straight into `library/` defeats the point.
+
+## Libraries
+
+| Folder under `library/` | Jellyfin content type | Path to enter in the UI |
+|---|---|---|
+{% for lib in jellyfin_libraries %}
+| `{{ lib }}/` | {{ jellyfin_library_types[lib] }} | `/media/{{ lib }}` |
+{% endfor %}
+
+Anime is split because a library folder may only hold one content type.
+
+## Naming
+
+The year in parentheses is what makes metadata matching reliable. Use it on the folder
+and on the file.
+
+**Films, documentaries, anime films** — one folder per film:
+
+```
+films/Blade Runner 2049 (2017)/Blade Runner 2049 (2017).mkv
+documentaries/Free Solo (2018)/Free Solo (2018).mkv
+anime/films/Spirited Away (2001)/Spirited Away (2001).mkv
+```
+
+**Series and anime series** — one folder per show, one per season:
+
+```
+series/Severance (2022)/Season 01/Severance (2022) S01E01.mkv
+anime/series/Frieren (2023)/Season 01/Frieren (2023) S01E01.mkv
+```
+
+Season folders are `Season 01`, `Season 02`, … (`Specials` for season 0). Episodes are
+`SxxEyy`. A double episode is `S01E01-E02`.
+
+**Music** — artist, then album with year:
+
+```
+music/Boards of Canada/Music Has the Right to Children (1998)/01 Wildlife Analysis.flac
+```
+
+**Audiobooks** — author, then book with year:
+
+```
+audiobooks/Andy Weir/Project Hail Mary (2021)/01 - Chapter 1.m4b
+```
+
+**Podcasts** — show, then episode with year. MeTube files them this way when the
+*Podcast* preset is ticked:
+
+```
+podcasts/All-In Podcast/Episode Title (2026)/01 Episode Title.opus
+```
+
+**YouTube** — channel, then video with year. MeTube files every video download here:
+
+```
+youtube/Big Think/Video Title (2025)/01 Video Title.webm
+```
+
+## Extras
+
+Several qualities of the same film live side by side in its folder:
+
+```
+films/Dune (2021)/Dune (2021) - [2160p].mkv
+films/Dune (2021)/Dune (2021) - [1080p].mkv
+```
+
+Bonus material goes in an `extras/` subfolder, or uses a suffix Jellyfin recognises —
+`-trailer`, `-behindthescenes`, `-deleted`, `-interview`:
+
+```
+films/Dune (2021)/Dune (2021)-trailer.mkv
+```
+
+External subtitles sit next to the video, tagged with a language code:
+
+```
+films/Dune (2021)/Dune (2021).en.srt
+films/Dune (2021)/Dune (2021).de.forced.srt
+```
+
+## Gotchas
+
+- `/media` is mounted **read-only**. Jellyfin writes all metadata and artwork into its
+  own config volume, never next to your files.
+- After moving files in, trigger *Dashboard → Scheduled Tasks → Scan All Libraries*
+  rather than waiting for the periodic scan.
+- Adding a new library is a one-line change to `jellyfin_libraries` in
+  `ansible/roles/jellyfin/defaults/main.yml`, then re-run the role — do not mkdir by
+  hand, the next run will not know about it.

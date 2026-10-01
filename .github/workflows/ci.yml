@@ -1,0 +1,40 @@
+---
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  renovate-coverage:
+    name: Renovate coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate renovate.json5
+        run: |
+          image=$(grep -oP 'RENOVATE_IMAGE = "\K[^"]+' scripts/check-renovate-coverage.py)
+          docker run --rm -v "$PWD":/repo -w /repo "$image" \
+            renovate-config-validator /repo/renovate.json5
+
+      - name: Every version pin is visible to Renovate
+        run: ./scripts/check-renovate-coverage.py
+
+      - name: Every pinned image tag exists
+        run: ./scripts/check-pinned-tags.py
+
+  metube-routing:
+    name: MeTube library routing
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: astral-sh/setup-uv@v10.2.0
+
+      - name: Downloads land in the right Jellyfin library
+        run: ./scripts/check-metube-routing.py

@@ -1,0 +1,22 @@
+---
+- resources:
+    cpu: true
+    memory: true
+    cputemp: true
+    uptime: true
+    units: metric
+    refresh: 3000
+    disk:
+      - /
+
+- datetime:
+    text_size: x1
+    format:
+      timeStyle: short
+      dateStyle: medium
+      hour12: false
+
+- search:
+    provider: duckduckgo
+    target: _blank
+    showSearchSuggestions: true

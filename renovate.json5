@@ -1,0 +1,48 @@
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:recommended"],
+
+  // Image pins live in group_vars as Ansible variables, not in the compose
+  // files — those are .j2 templates that only reference the variables. No
+  // built-in manager reads group_vars, so the annotation comments above each
+  // pin are what makes them visible.
+  customManagers: [
+    {
+      customType: "regex",
+      description: "Service version pins in group_vars",
+      managerFilePatterns: ["/^ansible/group_vars/all/vars\\.yml$/"],
+      matchStrings: [
+        "# renovate: datasource=(?<datasource>[a-z-]+?) depName=(?<depName>[^\\s]+?)(?: versioning=(?<versioning>[^\\s]+?))?\\s+[a-z0-9_]+?_version:\\s*[\"']?(?<currentValue>[^\"'\\s]+)[\"']?\\s",
+      ],
+    },
+  ],
+
+  // One PR per dependency: one PR maps to one `--tags <role>` deploy, so a bad
+  // bump is reviewed, deployed and reverted in isolation.
+  separateMinorPatch: true,
+  prConcurrentLimit: 10,
+  prHourlyLimit: 0,
+
+  // Timing lives in the Actions cron alone. A schedule here would be a second
+  // source of truth that drifts away from it.
+  schedule: ["at any time"],
+
+  packageRules: [
+    // apache/tika ships stable releases, -full variants and rolling -SNAPSHOT builds
+    // in one tag namespace, and `loose` versioning accepts all of them. Only plain
+    // numeric releases are real upgrades here.
+    {
+      matchDatasources: ["docker"],
+      matchPackageNames: ["apache/tika"],
+      allowedVersions: "/^\\d+\\.\\d+\\.\\d+$/",
+    },
+    {
+      matchUpdateTypes: ["major"],
+      labels: ["renovate", "major"],
+    },
+    {
+      matchUpdateTypes: ["minor", "patch"],
+      labels: ["renovate"],
+    },
+  ],
+}

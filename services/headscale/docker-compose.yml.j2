@@ -1,0 +1,86 @@
+---
+services:
+
+  headscale:
+    image: headscale/headscale:{{ headscale_version }}
+    container_name: headscale
+    restart: unless-stopped
+    command: serve
+    volumes:
+      - {{ homelab_base_dir }}/services/headscale/config:/etc/headscale:ro
+      - headscale_data:/var/lib/headscale
+    depends_on:
+      headscale-db:
+        condition: service_healthy
+    networks:
+      - proxy
+      - internal
+    labels:
+      - "traefik.enable=true"
+      # Headscale lives at vpn.<domain> (public, direct via port-forward — not under home.<domain>)
+      - "traefik.http.routers.headscale.rule=Host(`vpn.{{ domain }}`)"
+      - "traefik.http.routers.headscale.entrypoints=websecure"
+      - "traefik.http.routers.headscale.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.headscale.tls.options=no-h2@file"
+      - "traefik.http.services.headscale.loadbalancer.server.port=8080"
+      - "traefik.docker.network=proxy"
+
+  headplane:
+    image: ghcr.io/tale/headplane:{{ headplane_version }}
+    container_name: headplane
+    restart: unless-stopped
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - {{ homelab_base_dir }}/services/headscale/config:/etc/headscale:ro
+      - {{ homelab_base_dir }}/services/headscale/headplane.yaml:/etc/headplane/config.yaml:ro
+    depends_on:
+      - headscale
+    networks:
+      - proxy
+      - internal
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.headplane.rule=Host(`headscale.{{ internal_subdomain }}.{{ domain }}`) && PathPrefix(`/admin`)"
+      - "traefik.http.middlewares.headplane-root.redirectregex.regex=^https://headscale\\.{{ internal_subdomain }}\\.{{ domain }}(/?)$$"
+      - "traefik.http.middlewares.headplane-root.redirectregex.replacement=https://headscale.{{ internal_subdomain }}.{{ domain }}/admin"
+      - "traefik.http.routers.headplane-root.rule=Host(`headscale.{{ internal_subdomain }}.{{ domain }}`)"
+      - "traefik.http.routers.headplane-root.entrypoints=websecure"
+      - "traefik.http.routers.headplane-root.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.headplane-root.middlewares=headplane-root"
+      - "traefik.http.routers.headplane-root.service=headplane"
+      - "traefik.http.routers.headplane.entrypoints=websecure"
+      - "traefik.http.routers.headplane.tls.certresolver=letsencrypt"
+      - "traefik.http.services.headplane.loadbalancer.server.port=3000"
+      - "traefik.docker.network=proxy"
+
+  headscale-db:
+    image: postgres:{{ postgres_version }}
+    container_name: headscale-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: headscale
+      POSTGRES_USER: headscale
+      POSTGRES_PASSWORD: "{{ vault_headscale_db_password }}"
+    volumes:
+      - headscale_db:/var/lib/postgresql
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U headscale -d headscale"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
+networks:
+  proxy:
+    external: true
+  internal:
+    name: headscale_internal
+    internal: true
+
+volumes:
+  headscale_data:
+    name: headscale_data
+  headscale_db:
+    name: headscale_db

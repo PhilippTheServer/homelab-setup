@@ -1,0 +1,47 @@
+---
+# Web UI hostname. Needs a matching entry in `pihole_dns_hosts` — there is no *.home
+# wildcard record.
+metube_host: "ytdl.{{ internal_subdomain }}.{{ domain }}"
+
+# uid/gid MeTube runs as. Must be deploy_user's, since the media tree is owned by it
+# and CHOWN_DIRS is off. `id philipp` on the Mini PC if this ever needs checking.
+metube_puid: 1000
+metube_pgid: 1000
+
+# Host paths, expressed as the container sees them under the single {{ jellyfin_media_root }}
+# bind mount. Downloads land directly in the Jellyfin library tree — the output template
+# picks music/, youtube/ or podcasts/ beneath it; intermediate files stay in the staging
+# tree, which Jellyfin does not mount.
+metube_library_subdir: library
+metube_temp_subdir: incoming/metube
+metube_container_library_dir: "/media/{{ metube_library_subdir }}"
+metube_container_temp_dir: "/media/{{ metube_temp_subdir }}"
+
+# yt-dlp output template, matching the library that already exists: artist directory,
+# one directory per release named "<Album> (<Year>)", one track inside it.
+#
+# Uploads from a YouTube Music "- Topic" channel carry real music metadata, and these
+# four fields reproduce the existing tracks character for character:
+#
+#   artists.0     — primary artist. `artist` is the whole credit list joined with
+#                   commas ("Daciva, SRXPH, rediver, ..."), which is not a directory name
+#   album         — the release the track belongs to
+#   track         — the track title, which differs from the video title often enough
+#                   to matter ("Dark Horse (Hardstyle)" vs "Dark Horse")
+#   release_year  — falls back through release_date and upload_date
+#
+# An ordinary channel upload has none of them, and yt-dlp cannot invent them: those land
+# under the uploading channel with the raw video title, to be renamed in place later.
+metube_track_template: "%(artists.0,artist,uploader)s/%(album,track,title)s (%(release_year,release_date>%Y,upload_date>%Y)s)/01 %(track,title)s.%(ext)s"
+
+# MeTube has one output template for audio and video alike, so the library is chosen
+# inside it: an audio-only format has no height, anything with a picture does.
+metube_output_template: "%(height&youtube|music)s/{{ metube_track_template }}"
+
+# Ticked per download under Advanced Options. MeTube cannot route by channel — yt-dlp
+# templates do not compare values — and a preset cannot leave the download directory,
+# which is why that directory is the whole library tree rather than music/.
+metube_ytdl_options_presets:
+  Podcast:
+    outtmpl:
+      default: "podcasts/{{ metube_track_template }}"

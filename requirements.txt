@@ -1,0 +1,18 @@
+# Controller-side Python dependencies for the Ansible control node.
+# Install into a project virtualenv (the system Python is PEP 668 externally
+# managed, so install here rather than globally):
+#
+#   uv venv
+#   uv pip install -r requirements.txt
+#   .venv/bin/ansible-galaxy collection install -r ansible/requirements.yml
+#
+# Then run playbooks from the repo root (ansible.cfg lives here):
+#   source .venv/bin/activate
+#   ansible-playbook ansible/site.yml --tags <role>
+
+# Pinned to the latest released versions (policy: track latest, bump deliberately).
+# To bump: `uv pip install --upgrade ansible-core hvac` then update the pins to match.
+# Note: hvac 2.x is verified working with community.hashi_vault 7.x (the old
+# `hvac<2` cap was an obsolete workaround and has been removed).
+ansible-core==2.21.4
+hvac==2.4.0

@@ -1,0 +1,16 @@
+---
+- name: Configure Docker daemon log limits
+  copy:
+    dest: /etc/docker/daemon.json
+    content: |
+      {
+        "log-driver": "json-file",
+        "log-opts": {
+          "max-size": "5m",
+          "max-file": "1"
+        }
+      }
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart docker

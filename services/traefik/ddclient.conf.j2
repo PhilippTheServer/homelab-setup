@@ -1,0 +1,14 @@
+daemon=300
+syslog=yes
+ssl=yes
+
+use=web
+web=icanhazip.com
+
+protocol=namecheap
+server=dynamicdns.park-your-domain.com
+login={{ domain }}
+password={{ vault_namecheap_ddns_password }}
+vpn
+auth
+daily-mcp
